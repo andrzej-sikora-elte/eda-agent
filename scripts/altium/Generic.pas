@@ -472,6 +472,67 @@ Begin
         Result := IntToStr(CoordToMils(Vtx.Y));
 End;
 
+{ Current PCB footprint of a placed component. CurrentFootprintModelName is }
+{ read-only, so footprint edits go through the PCBLIB ISch_Implementation.  }
+Function GetCompFootprint(Comp : ISch_Component) : String;
+Var
+    It : ISch_Iterator;
+    Impl : ISch_Implementation;
+Begin
+    Result := '';
+    It := Comp.SchIterator_Create;
+    It.AddFilter_ObjectSet(MkSet(eImplementation));
+    Impl := It.FirstSchObject;
+    While Impl <> Nil Do
+    Begin
+        If (UpperCase(Impl.ModelType) = 'PCBLIB') And Impl.IsCurrent Then
+            Result := Impl.ModelName;
+        Impl := It.NextSchObject;
+    End;
+    Comp.SchIterator_Destroy(It);
+End;
+
+{ Value format: "ModelName" or "ModelName@Library.PcbLib" (library is written }
+{ into every datafile link of the current PCBLIB implementation).            }
+Function SetCompFootprint(Comp : ISch_Component; Value : String) : Boolean;
+Var
+    It : ISch_Iterator;
+    Impl : ISch_Implementation;
+    I, AtPos : Integer;
+    ModelName, LibName : String;
+Begin
+    Result := False;
+    AtPos := Pos('@', Value);
+    If AtPos > 0 Then
+    Begin
+        ModelName := Copy(Value, 1, AtPos - 1);
+        LibName := Copy(Value, AtPos + 1, Length(Value));
+    End
+    Else
+    Begin
+        ModelName := Value;
+        LibName := '';
+    End;
+    It := Comp.SchIterator_Create;
+    It.AddFilter_ObjectSet(MkSet(eImplementation));
+    Impl := It.FirstSchObject;
+    While Impl <> Nil Do
+    Begin
+        If (UpperCase(Impl.ModelType) = 'PCBLIB') And Impl.IsCurrent Then
+        Begin
+            Impl.ModelName := ModelName;
+            For I := 0 To Impl.DatafileLinkCount - 1 Do
+            Begin
+                Impl.DatafileLink(I).EntityName := ModelName;
+                If LibName <> '' Then Impl.DatafileLink(I).Location := LibName;
+            End;
+            Result := True;
+        End;
+        Impl := It.NextSchObject;
+    End;
+    Comp.SchIterator_Destroy(It);
+End;
+
 Function GetSchProperty(Obj : ISch_GraphicalObject; PropName : String) : String;
 Var
     R : ISch_Rectangle;
@@ -538,6 +599,11 @@ Begin
         Else If PropName = 'LibReference'       Then Result := Obj.LibReference
         Else If PropName = 'SourceLibraryName'  Then Result := Obj.SourceLibraryName
         Else If PropName = 'DesignItemId'       Then Result := Obj.DesignItemId
+        Else If PropName = 'LibraryIdentifier'  Then Result := Obj.LibraryIdentifier
+        Else If PropName = 'DatabaseTableName'  Then Result := Obj.DatabaseTableName
+        Else If PropName = 'UseDBTableName'     Then Result := BoolToJsonStr(Obj.UseDBTableName)
+        Else If PropName = 'UseLibraryName'     Then Result := BoolToJsonStr(Obj.UseLibraryName)
+        Else If PropName = 'FootprintModel'     Then Result := GetCompFootprint(Obj)
         // Which part of a multi-part symbol owns this primitive (0 = shared
         // across all parts). Without it a caller querying a multi-part
         // library symbol cannot tell which part a returned primitive is on.
@@ -843,6 +909,13 @@ Begin
         // matched. A stale DesignItemId after a library re-link is what
         // produces the <Not Found> state in the Properties panel.
         Else If PropName = 'DesignItemId'       Then Obj.DesignItemId := Value
+        // DbLib link fields (local patch): with SourceLibraryName = <x>.DbLib
+        // and DesignItemId = record ID these bind the part to a database row.
+        Else If PropName = 'LibraryIdentifier'  Then Obj.LibraryIdentifier := Value
+        Else If PropName = 'DatabaseTableName'  Then Obj.DatabaseTableName := Value
+        Else If PropName = 'UseDBTableName'     Then Obj.UseDBTableName := StrToBool(Value)
+        Else If PropName = 'UseLibraryName'     Then Obj.UseLibraryName := StrToBool(Value)
+        Else If PropName = 'FootprintModel'     Then Matched := SetCompFootprint(Obj, Value)
         // `Description` is the natural name (matches get_component_info /
         // BOM column / lib_set_component_description); `ComponentDescription`
         // is what ISch_Component actually exposes -- both accepted.
