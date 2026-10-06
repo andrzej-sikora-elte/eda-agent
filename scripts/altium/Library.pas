@@ -1438,7 +1438,9 @@ Function Lib_AddFootprintPads(Params : String; RequestId : String) : String;
 Var
     PadsStr, Op, Remaining, Shape, LayerStr, BadLayers : String;
     OpCount, Added, Failed : Integer;
-    X, Y, XSize, YSize, HoleSize, CornerRadius : Integer;
+    { Float mils: a 0.5 mm pitch is 19.685 mil, integer mils drift 8 um a pad. }
+    X, Y, XSize, YSize, HoleSize : Double;
+    CornerRadius : Integer;
     Rotation : Double;
     PadLayer : TLayer;
     PcbLib : IPCB_Library;
@@ -1479,11 +1481,11 @@ Begin
             Op := NextBatchOp(Remaining);
             If Op = '' Then Break;
             OpCount := OpCount + 1;
-            X := StrToIntDef(GetBatchField(Op, 'x'), 0);
-            Y := StrToIntDef(GetBatchField(Op, 'y'), 0);
-            XSize := StrToIntDef(GetBatchField(Op, 'x_size'), 60);
-            YSize := StrToIntDef(GetBatchField(Op, 'y_size'), 60);
-            HoleSize := StrToIntDef(GetBatchField(Op, 'hole_size'), 0);
+            X := StrToFloatDef(GetBatchField(Op, 'x'), 0);
+            Y := StrToFloatDef(GetBatchField(Op, 'y'), 0);
+            XSize := StrToFloatDef(GetBatchField(Op, 'x_size'), 60);
+            YSize := StrToFloatDef(GetBatchField(Op, 'y_size'), 60);
+            HoleSize := StrToFloatDef(GetBatchField(Op, 'hole_size'), 0);
             Rotation := StrToFloatDef(GetBatchField(Op, 'rotation'), 0);
             Shape := GetBatchField(Op, 'shape');
             LayerStr := GetBatchField(Op, 'layer');
@@ -1512,11 +1514,11 @@ Begin
             End;
 
             Pad.Name := GetBatchField(Op, 'designator');
-            Pad.X := FootprintOriginX(Footprint) + MilsToCoord(X);
-            Pad.Y := FootprintOriginY(Footprint) + MilsToCoord(Y);
-            Pad.TopXSize := MilsToCoord(XSize);
-            Pad.TopYSize := MilsToCoord(YSize);
-            Pad.HoleSize := MilsToCoord(HoleSize);
+            Pad.X := FootprintOriginX(Footprint) + MilsToCoordF(X);
+            Pad.Y := FootprintOriginY(Footprint) + MilsToCoordF(Y);
+            Pad.TopXSize := MilsToCoordF(XSize);
+            Pad.TopYSize := MilsToCoordF(YSize);
+            Pad.HoleSize := MilsToCoordF(HoleSize);
             Pad.Rotation := Rotation;
 
             { Layer FIRST (roundrect setters are layer-aware): drilled ->       }

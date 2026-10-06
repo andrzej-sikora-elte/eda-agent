@@ -326,6 +326,12 @@ def _payload_safe(value: object) -> str:
     return payload_safe(value)
 
 
+def _mils(value: Any) -> str:
+    """Format a mil value for the pad payload, keeping sub-mil precision."""
+    r = round(float(value), 4)
+    return str(int(r)) if r == int(r) else f"{r:.4f}".rstrip("0")
+
+
 def _pads_payload(pads: list[dict[str, Any]]) -> tuple[str, int]:
     """Build the ``pads`` batch payload, and count what was dropped.
 
@@ -352,11 +358,13 @@ def _pads_payload(pads: list[dict[str, Any]]) -> tuple[str, int]:
             continue
         fields = [
             f"designator={desig}",
-            f"x={round(p.get('x', 0))}",
-            f"y={round(p.get('y', 0))}",
-            f"x_size={round(p.get('x_size', 60))}",
-            f"y_size={round(p.get('y_size', 60))}",
-            f"hole_size={round(p.get('hole_size', 0))}",
+            # Float mils (4 decimals = 0.0254 um): a 0.5 mm pitch is 19.685 mil,
+            # and rounding to whole mils drifts a 9-pad row by 32 um.
+            f"x={_mils(p.get('x', 0))}",
+            f"y={_mils(p.get('y', 0))}",
+            f"x_size={_mils(p.get('x_size', 60))}",
+            f"y_size={_mils(p.get('y_size', 60))}",
+            f"hole_size={_mils(p.get('hole_size', 0))}",
             f"shape={_payload_safe(p.get('shape', 'rectangular'))}",
             f"corner_radius={round(p.get('corner_radius', 25))}",
             f"rotation={_payload_safe(p.get('rotation', 0))}",
