@@ -95,8 +95,8 @@ def test_it_actually_reaches_the_client():
 def test_every_tool_the_preamble_names_exists(backend):
     """Each backend's own wording, against its own surface.
 
-    The wording is not shared: design_execute_plan is Altium-only, and
-    the paragraph that names it was going out to KiCad clients too,
+    The wording is not shared: the schematic tools differ per backend,
+    and a paragraph naming Altium's once went out to KiCad clients too,
     telling them to call five tools that backend never registers.
     """
     text = build_server_instructions("full", backend)
@@ -107,13 +107,16 @@ def test_every_tool_the_preamble_names_exists(backend):
 
 
 @pytest.mark.parametrize("backend", _BACKENDS)
-def test_a_backend_with_the_engine_says_so(backend):
-    """The paragraph is dropped when the engine is absent, not faked."""
+def test_a_backend_says_how_it_draws_a_schematic(backend):
+    """The template route where the template tools exist, nothing
+    where they do not."""
     text = build_server_instructions("full", backend)
-    has_engine = "design_layout_schematic" in _SURFACES[backend]
-    assert ("DO NOT DRAW A SCHEMATIC BY HAND" in text) is has_engine, (
-        f"{backend} {'has' if has_engine else 'does not have'} the layout "
-        f"engine, and its preamble says the opposite")
+    has_template = bool({"sch_draw_template", "easyeda_emit_template"}
+                        & set(_SURFACES[backend]))
+    assert ("A SCHEMATIC IS DRAWN FROM A HAND TEMPLATE" in text) is has_template, (
+        f"{backend}: the preamble's schematic paragraph does not match "
+        f"its tools")
+    assert "DO NOT DRAW A SCHEMATIC BY HAND" not in text
 
 
 def test_it_names_at_least_the_two_it_is_for():
@@ -130,10 +133,12 @@ def test_every_namespace_it_teaches_is_real(namespace):
         f"uses any more")
 
 
-def test_it_names_the_tool_that_draws_a_schematic():
-    """The preamble's whole point is redirecting a by-hand schematic."""
+def test_it_names_the_tools_that_draw_a_schematic():
+    """The preamble's whole point is sending a schematic down the
+    template route, checked before it is drawn."""
     named = _tools_named(SERVER_INSTRUCTIONS)
-    assert "design_execute_plan" in named
+    assert {"sch_preview_template", "sch_draw_template",
+            "lib_get_pin_list"} <= named
 
 
 def test_the_minimal_wording_does_not_name_an_unadvertised_tool():

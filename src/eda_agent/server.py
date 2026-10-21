@@ -134,38 +134,40 @@ ACTIVE_TOOLSET = os.environ.get("EDA_AGENT_TOOLSET", DEFAULT_TOOLSET)
 #: a paragraph naming tools that are not there. A preamble that names a
 #: missing tool is read first and trusted most, which is the worst place
 #: for a dead end.
+#: Altium draws from a hand template (decided 2026-10-20: the automatic
+#: layout is being retired; a planned template came out clean first time
+#: where the engine did not after many rounds).
 _ENGINE_ALTIUM = (
-    "DO NOT DRAW A SCHEMATIC BY HAND. Placing parts one at a time\n"
-    "with sch_place_components and joining them with sch_place_wires\n"
-    "gives a netlist-correct sheet that reads like nothing a person\n"
-    "would draw, and it is the most common way this server is misused.\n"
-    "A schematic comes from a DesignPlan: build the plan, then\n"
-    "design_execute_plan places AND routes the whole sheet in one\n"
-    "call, through a layout engine measured against hand-drawn boards.\n"
-    "design_layout_schematic returns that same layout as data and\n"
-    "design_preview_plan renders it, both without touching the EDA.\n"
-    "One engine sits behind all three.\n"
+    "A SCHEMATIC IS DRAWN FROM A HAND TEMPLATE. Plan the sheet the way\n"
+    "an engineer draws it, every coordinate on the 100 mil grid: the IC\n"
+    "in the middle, supply rails as straight wires with their capacitors\n"
+    "hanging straight down to ground, a feedback divider as a vertical\n"
+    "stack whose midpoint runs straight across to its pin, net labels\n"
+    "only where a signal leaves the block. Read each symbol's pins with\n"
+    "lib_get_pin_list, write the template (parts, wires through pin\n"
+    "anchors like U1.EN, power ports, labels and the expected nets),\n"
+    "check it with sch_preview_template and look at its PNG, then draw\n"
+    "it with sch_draw_template. That places the parts, works out every\n"
+    "pin end, checks the wiring against the placed pins and refuses a\n"
+    "short or a misplaced part before the first wire.\n"
     "\n"
-    "CHANGING an existing sheet goes the same way. Re-running\n"
-    "design_execute_plan on a project it drew before moves only what\n"
-    "the plan changed and leaves every other component alone, so an\n"
-    "edit is a plan edit. For a sheet it did not draw,\n"
-    "design_plan_from_sheet reads a plan back off the schematic and\n"
-    "design_hints_from_sheet reads the current positions to pass as\n"
-    "placement_hints. The sch_ and obj_ tools are for the few glyphs a\n"
-    "plan cannot express, and for repairs too small to re-lay-out.\n"
+    "To CHANGE a block, redraw it from a template on a fresh sheet\n"
+    "rather than moving parts one at a time. The sch_ and obj_ tools\n"
+    "are for small repairs.\n"
     "\n"
 )
 
 _ENGINE_EASYEDA = (
-    "DO NOT DRAW A SCHEMATIC BY HAND. Placing parts one at a time\n"
-    "with easyeda_place_schematic_components and joining them with\n"
-    "easyeda_add_wires gives a netlist-correct sheet that reads like\n"
-    "nothing a person would draw, and it is the most common way this\n"
-    "server is misused. A schematic comes from a DesignPlan: build the\n"
-    "plan, lay it out with design_layout_schematic, which runs the same\n"
-    "engine measured against hand-drawn boards, then apply it with\n"
-    "easyeda_emit_plan.\n"
+    "A SCHEMATIC IS DRAWN FROM A HAND TEMPLATE. Build the DesignPlan,\n"
+    "then plan the sheet the way an engineer draws it, every coordinate\n"
+    "on the 100 mil grid: the IC in the middle, rails as straight wires\n"
+    "with their capacitors hanging straight down to ground, a divider\n"
+    "whose midpoint runs straight across to its pin, net labels only\n"
+    "where a signal leaves the block. easyeda_emit_template returns the\n"
+    "calls that place the parts there; run them, read the pins back with\n"
+    "easyeda_get_schematic_pins, and easyeda_emit_template_connections\n"
+    "checks the template's wiring against those pins and the plan's\n"
+    "nets and returns the calls that draw it.\n"
     "\n"
 )
 
@@ -217,9 +219,9 @@ def build_server_instructions(
     saying which applies is the difference between guidance and a dead
     end for the clients that most need the guidance.
 
-    The backend does the same job for the schematic-engine paragraph:
-    design_execute_plan is Altium-only, so naming it to a KiCad client
-    sent it looking for a tool that backend never registers.
+    The backend does the same job for the schematic paragraph: the
+    template tools differ per backend, so naming Altium's to a KiCad
+    client would send it looking for a tool that backend never registers.
     """
     if (toolset or DEFAULT_TOOLSET).strip().lower() == "minimal":
         reach = ('reach tool_guide through tool_invoke, since this server '
@@ -834,24 +836,6 @@ def main() -> int:
               "Altium script and you want to kill it without rebooting."),
     )
 
-    # vote -- pairwise-preference vote UI in the browser
-    vote_p = subparsers.add_parser(
-        "vote",
-        help=(
-            "Launch the pairwise layout-preference vote UI in your "
-            "browser. Generates two layouts of the same plan; you click "
-            "the better one. Builds training data for the quality model."
-        ),
-    )
-    vote_p.add_argument("--plan", required=True, type=Path,
-                        help="Path to the DesignPlan JSON to vote on.")
-    vote_p.add_argument("--symbols", type=Path, default=None,
-                        help="Symbol fixtures JSON for offline mode. "
-                             "Omit to use the live Altium bridge.")
-    vote_p.add_argument("--host", default="127.0.0.1")
-    vote_p.add_argument("--port", type=int, default=8765)
-    vote_p.add_argument("--debug", action="store_true")
-
     # review -- OFFLINE FALLBACK, opt-in schematic review (no Altium).
     # Not the preferred path: the live-Altium tools see connectivity this
     # reader can't. Disabled unless --offline / EDA_AGENT_HEADLESS_REVIEW=1.
@@ -998,15 +982,6 @@ def main() -> int:
         except Exception as e:
             print(f"could not stop dashboard pid {pid}: {e}")
             return 1
-    if args.command == "vote":
-        from .web.server import main as vote_main
-        return vote_main([
-            "--plan", str(args.plan),
-            *(["--symbols", str(args.symbols)] if args.symbols else []),
-            "--host", args.host,
-            "--port", str(args.port),
-            *(["--debug"] if args.debug else []),
-        ])
     if args.command == "review":
         return _run_review(args)
     if args.command == "bom":
