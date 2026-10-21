@@ -35,6 +35,41 @@ Begin
     Result := Coord * 25.4 / 10000000;
 End;
 
+{ Lengths in the caller's unit: 'mil' (also empty, the default) or 'mm'.    }
+{ Authoring took whole mils only, so 1.625 mm arrived as 64 mil and read    }
+{ back as 1.6256 mm, off a metric grid on every pad. The mil path is        }
+{ MilsToCoordF, which equals MilsToCoord for whole mils, so a caller that   }
+{ never passes units places exactly what it did before.                     }
+Function UnitsAreMM(Units : String) : Boolean;
+Begin
+    Result := LowerCase(Trim(Units)) = 'mm';
+End;
+
+{ '' when the unit is one of the two, else the refusal to send.             }
+Function UnitsProblem(Units : String) : String;
+Var
+    U : String;
+Begin
+    Result := '';
+    U := LowerCase(Trim(Units));
+    If (U <> '') And (U <> 'mil') And (U <> 'mils') And (U <> 'mm') Then
+        Result := 'Unknown units: ' + Units + '. Use mil or mm.';
+End;
+
+Function CoordFromUnits(Value : Double; Units : String) : TCoord;
+Begin
+    If UnitsAreMM(Units) Then Result := MMToCoord(Value)
+    Else Result := MilsToCoordF(Value);
+End;
+
+{ A default written in mils, in the caller's unit. A bare default of 60 is  }
+{ 60 mils; read as millimetres it would be a 60 mm pad.                     }
+Function MilsInUnits(Mils : Double; Units : String) : Double;
+Begin
+    If UnitsAreMM(Units) Then Result := Mils * 0.0254
+    Else Result := Mils;
+End;
+
 {..............................................................................}
 { ResolveSchLibForLoad - any library path in, a loadable .SchLib path out.     }
 {                                                                              }
@@ -239,6 +274,68 @@ Begin
     Else Result := 'false';
 End;
 
+{ The first condition in a filter that is not Name=Value, or '' when every }
+{ one is. A filter is Name=Value pairs joined by |, nothing else. A bare     }
+{ name (IsDesignator) or an Altium query (OnLayer('TopLayer') Or ...) used   }
+{ to be skipped, which emptied the filter and matched every object: an       }
+{ obj_delete given one removed every track on the board and reported         }
+{ success. Names are letters, digits, '_' and '.' (Designator.Text).        }
+Function FilterProblem(FilterStr : String) : String;
+Var
+    Remaining, Condition, PropName, Ch : String;
+    PipePos, EqPos, I : Integer;
+    Ok : Boolean;
+Begin
+    Result := '';
+    Remaining := FilterStr;
+    While Remaining <> '' Do
+    Begin
+        PipePos := Pos('|', Remaining);
+        If PipePos > 0 Then
+        Begin
+            Condition := Copy(Remaining, 1, PipePos - 1);
+            Remaining := Copy(Remaining, PipePos + 1, Length(Remaining));
+        End
+        Else
+        Begin
+            Condition := Remaining;
+            Remaining := '';
+        End;
+        If Trim(Condition) = '' Then Continue;
+        EqPos := Pos('=', Condition);
+        Ok := EqPos > 1;
+        If Ok Then
+        Begin
+            PropName := Copy(Condition, 1, EqPos - 1);
+            For I := 1 To Length(PropName) Do
+            Begin
+                Ch := Copy(PropName, I, 1);
+                If Pos(Ch, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.') = 0 Then
+                    Ok := False;
+            End;
+        End;
+        If Not Ok Then
+        Begin
+            Result := Condition;
+            Exit;
+        End;
+    End;
+End;
+
+Function BadFilterMessage(Condition : String) : String;
+Var
+    Hint : String;
+Begin
+    Hint := '';
+    If (Pos('=', Condition) = 0) And (Pos('(', Condition) = 0)
+       And (Pos(' ', Trim(Condition)) = 0) Then
+        Hint := 'For a true/false property write ' + Trim(Condition) + '=true. ';
+    Result := 'Filter condition "' + Condition + '" is not Name=Value. A filter '
+        + 'is Name=Value pairs joined by |, each matched exactly; Altium query '
+        + 'expressions (OnLayer(...), Or, And) and bare names are not understood. '
+        + Hint + 'Nothing was matched or changed.';
+End;
+
 Function FloatToJsonStr(Value : Double) : String;
 Var
     Sep, Ch, Swapped : String;
@@ -257,8 +354,17 @@ Begin
 
       Swapping is complete because FloatToStr emits only digits, a sign, an
       exponent 'E' and the single decimal separator. It never emits a
-      thousands separator, which is FloatToStrF with ffNumber. }
+      thousands separator, which is FloatToStrF with ffNumber.
+
+      NAN AND INF ARE NOT JSON. FloatToStr writes them for a failed
+      computation, and the whole reply then failed to parse, which the
+      bridge could only report as a crash mid-write. They go out as null. }
     Result := FloatToStr(Value);
+    If (Pos('NAN', UpperCase(Result)) > 0) Or (Pos('INF', UpperCase(Result)) > 0) Then
+    Begin
+        Result := 'null';
+        Exit;
+    End;
     Sep := DecimalSeparator;
     If Sep <> '.' Then
     Begin
@@ -273,7 +379,7 @@ Begin
     End;
 End;
 
-{ HexNibble / ByteToHex4 / EscapeJsonString MUST be defined before the JSON  }
+{ HexNibble / CodeUnitHex4 / EscapeJsonString MUST be defined before the JSON}
 { prop builders below, which call EscapeJsonString. DelphiScript resolves     }
 { identifiers top-down within a unit and has no Forward declarations, so a    }
 { callee defined later in the file is "Undeclared identifier" at the caller.  }
@@ -283,9 +389,14 @@ Begin
     Else Result := Chr(Ord('A') + (N - 10));
 End;
 
-Function ByteToHex4(B : Integer) : String;
+{ All four hex digits of one UTF-16 code unit. Strings are UTF-16 here, so  }
+{ Ord of a CJK character is above 255; writing '00' plus the low byte sent }
+{ U+4E2D back as U+002D. A character outside the BMP is two code units and }
+{ comes out as its surrogate pair, which JSON readers join.                }
+Function CodeUnitHex4(B : Integer) : String;
 Begin
-    Result := '00' + HexNibble((B Shr 4) And $F) + HexNibble(B And $F);
+    Result := HexNibble((B Shr 12) And $F) + HexNibble((B Shr 8) And $F)
+        + HexNibble((B Shr 4) And $F) + HexNibble(B And $F);
 End;
 
 Function EscapeJsonString(S : String) : String;
@@ -332,17 +443,16 @@ Begin
         Exit;
     End;
 
-    // Slow path: char-by-char with \u00XX for any non-ASCII byte. Non-ASCII
-    // input is treated as Latin-1 / CP1252 (Pascal's native single-byte
-    // encoding); the escape produces valid JSON consumable as UTF-8 by any
-    // reader. This is the single mechanism that lets us drop the Latin-1
-    // read kludge on the Python side, output is always pure ASCII.
+    // Slow path: char-by-char with \uXXXX for any non-ASCII character, all
+    // four digits of its UTF-16 code unit. The escape produces valid JSON
+    // consumable as UTF-8 by any reader, so the response file is always
+    // pure ASCII whatever codepage SaveToFile writes in.
     For I := 1 To Length(Tmp) Do
     Begin
         Ch := Copy(Tmp, I, 1);
         O := Ord(Ch[1]);
         If O >= 128 Then
-            Result := Result + '\u' + ByteToHex4(O)
+            Result := Result + '\u' + CodeUnitHex4(O)
         Else If O = Ord('\') Then Result := Result + '\\'
         Else If O = Ord('"') Then Result := Result + '\"'
         Else If O = 13 Then Result := Result + '\r'
@@ -350,7 +460,7 @@ Begin
         Else If O = 9 Then Result := Result + '\t'
         Else If O = 8 Then Result := Result + '\b'
         Else If O = 12 Then Result := Result + '\f'
-        Else If O < 32 Then Result := Result + '\u' + ByteToHex4(O)
+        Else If O < 32 Then Result := Result + '\u' + CodeUnitHex4(O)
         Else Result := Result + Ch;
     End;
 End;
@@ -945,6 +1055,55 @@ Begin
     End;
 End;
 
+{ The first length a rule's Descriptor states, in mils, or -1 when it     }
+{ states none. A descriptor carries the rule's value, as in "Clearance     }
+{ Constraint (Gap=6mil) (All),(All)", in the board's units. The silk rules }
+{ publish no typed member this code has verified, so their clearance is    }
+{ read from here rather than through an interface that could halt the      }
+{ polling loop. Units: mil, mm, in.                                        }
+Function GapMilsFromDescriptor(Desc : String) : Double;
+Var
+    I, J : Integer;
+    Num, Rest, Unt : String;
+    V : Double;
+Begin
+    Result := -1;
+    I := Pos('=', Desc);
+    While I > 0 Do
+    Begin
+        Rest := Copy(Desc, I + 1, Length(Desc));
+        J := 1;
+        Num := '';
+        While (J <= Length(Rest)) And (Pos(Copy(Rest, J, 1), '0123456789.') > 0) Do
+        Begin
+            Num := Num + Copy(Rest, J, 1);
+            J := J + 1;
+        End;
+        If (Num <> '') And IsFloatStr(Num) Then
+        Begin
+            V := StrToFloatDef(Num, -1);
+            Unt := LowerCase(Copy(Rest, J, 3));
+            If Unt = 'mil' Then
+            Begin
+                Result := V;
+                Exit;
+            End;
+            If Copy(Unt, 1, 2) = 'mm' Then
+            Begin
+                Result := V / 0.0254;
+                Exit;
+            End;
+            If Copy(Unt, 1, 2) = 'in' Then
+            Begin
+                Result := V * 1000.0;
+                Exit;
+            End;
+        End;
+        Desc := Copy(Desc, I + 1, Length(Desc));
+        I := Pos('=', Desc);
+    End;
+End;
+
 Function StrToIntDef(S : String; Default : Integer) : Integer;
 Begin
     { Guard the conversion: a non-integer value (blank, 'null', or a symbolic  }
@@ -1136,6 +1295,29 @@ Begin
     Else Result := 'Unknown';
 End;
 
+{ GetLayerString, plus Mechanical17 and up, which it calls Unknown. The     }
+{ number is taken from the layer's distance to Mechanical17 and kept only    }
+{ when LayerUtils.MechanicalLayer gives the same layer back for it.          }
+Function LayerDisplayName(Layer : TLayer) : String;
+Var
+    Base, Back : TLayer;
+    N : Integer;
+Begin
+    Result := GetLayerString(Layer);
+    If Result <> 'Unknown' Then Exit;
+    Try
+        Base := LayerUtils.MechanicalLayer(17);
+        N := 17 + (Layer - Base);
+        If (N >= 17) And (N <= 1024) Then
+        Begin
+            Back := LayerUtils.MechanicalLayer(N);
+            If Back = Layer Then Result := 'Mechanical' + IntToStr(N);
+        End;
+    Except
+        Result := 'Unknown';
+    End;
+End;
+
 Function ExtractJsonArray(Json : String; Key : String) : String;
 Var
     StartPos, EndPos : Integer;
@@ -1210,7 +1392,9 @@ Begin
     Result := StringReplace(Result, '_', '', -1);
     Result := StringReplace(Result, '-', '', -1);
     { The leading 'e' is Altium's convention and the first thing a caller
-      drops. No type here is ambiguous once it is gone. }
+      drops. A name that itself starts with 'e' (ellipse) loses its own
+      first letter, so a caller that must match the bare name checks it
+      before normalizing. }
     If (Length(Result) > 1) And (Copy(Result, 1, 1) = 'e') Then
         Result := Copy(Result, 2, Length(Result));
 End;
@@ -1915,4 +2099,11 @@ Begin
             + 'does not write, properties.failed lists writes that threw."'
     Else
         Result := Result + ',"success":true';
+End;
+
+{ UnitStamp_Utils - which build of Utils.pas Altium compiled; 'dev' here. }
+{ install-scripts writes the hash of this file into the deployed copy. }
+Function UnitStamp_Utils(Dummy : Integer) : String;
+Begin
+    Result := 'dev';
 End;
