@@ -12738,6 +12738,215 @@ Begin
         + '"mask_expansion_mils":' + FloatToJsonStr(ExpMils) + '}');
 End;
 
+{ Anchor K (0..7) for a designator read along its rotation: a horizontal     }
+{ text tries above/below first, a vertical one left/right first.            }
+Function OrientAnchor(Vertical : Boolean; K : Integer) : TTextAutoposition;
+Begin
+    If Vertical Then
+    Begin
+        Case K Of
+            0: Result := eAutoPos_CenterLeft;
+            1: Result := eAutoPos_CenterRight;
+            2: Result := eAutoPos_TopCenter;
+            3: Result := eAutoPos_BottomCenter;
+            4: Result := eAutoPos_TopLeft;
+            5: Result := eAutoPos_TopRight;
+            6: Result := eAutoPos_BottomLeft;
+        Else
+            Result := eAutoPos_BottomRight;
+        End;
+    End
+    Else
+    Begin
+        Case K Of
+            0: Result := eAutoPos_TopCenter;
+            1: Result := eAutoPos_BottomCenter;
+            2: Result := eAutoPos_CenterLeft;
+            3: Result := eAutoPos_CenterRight;
+            4: Result := eAutoPos_TopLeft;
+            5: Result := eAutoPos_TopRight;
+            6: Result := eAutoPos_BottomLeft;
+        Else
+            Result := eAutoPos_BottomRight;
+        End;
+    End;
+End;
+
+{..............................................................................}
+{ PCB_OrientDesignators - give each listed designator a fixed reading        }
+{ direction and park it at the first auto-position anchor that keeps silk    }
+{ and mask clearance (SilkBlocked, the same test as autoplace_silkscreen).   }
+{ Params: items = "DES:rot1,rot2;DES:rot1" (board degrees, tried in order),  }
+{ silk_clearance_mils, mask_clearance_mils, mask_expansion_mils (default 4). }
+{ A designator no rotation/anchor clears gets its original rotation and      }
+{ place back and is listed in unplaced_designators.                          }
+{..............................................................................}
+Function PCB_OrientDesignators(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Comp : IPCB_Component;
+    Slk : IPCB_Text;
+    BRect : TCoordRect;
+    Items, Item, DesName, RotStr, RotOne, S, PlacedList, UnplacedList, MissingList : String;
+    P, Q, K, Placed, Unplaced, Missing, Total : Integer;
+    BL, BB, BR, BT, SilkGap, MaskGap, OrigX, OrigY : Integer;
+    OrigAuto : TTextAutoposition;
+    OrigRot, Rot, SilkMils, MaskMils, ExpMils : Double;
+    Ok, WasOnline, Vertical : Boolean;
+Begin
+    Board := GetPCBBoardAnywhere(0);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+    S := ExtractJsonValue(Params, 'silk_clearance_mils');
+    If Not IsFloatStr(S) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_VALUE', 'silk_clearance_mils (number, mils) is required');
+        Exit;
+    End;
+    SilkMils := StrToFloatDef(S, 0);
+    S := ExtractJsonValue(Params, 'mask_clearance_mils');
+    If Not IsFloatStr(S) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_VALUE', 'mask_clearance_mils (number, mils) is required');
+        Exit;
+    End;
+    MaskMils := StrToFloatDef(S, 0);
+    ExpMils := 4;
+    S := ExtractJsonValue(Params, 'mask_expansion_mils');
+    If IsFloatStr(S) Then ExpMils := StrToFloatDef(S, 4);
+    Items := ExtractJsonValue(Params, 'items');
+
+    SilkGap := MilsToCoordF(SilkMils);
+    MaskGap := MilsToCoordF(MaskMils + ExpMils);
+    BRect := Board.BoardOutline.BoundingRectangle;
+    BL := BRect.Left;
+    BB := BRect.Bottom;
+    BR := BRect.Right;
+    BT := BRect.Top;
+    OutlineExtents(Board.BoardOutline, BL, BB, BR, BT);
+
+    Placed := 0;
+    Unplaced := 0;
+    Missing := 0;
+    Total := 0;
+    PlacedList := '';
+    UnplacedList := '';
+    MissingList := '';
+    WasOnline := True;
+    Try WasOnline := PCBServer.SystemOptions.DoOnlineDRC; Except End;
+    Try PCBServer.SystemOptions.DoOnlineDRC := False; Except End;
+    PCBServer.PreProcess;
+    Try
+        While Items <> '' Do
+        Begin
+            P := Pos(';', Items);
+            If P = 0 Then
+            Begin
+                Item := Items;
+                Items := '';
+            End
+            Else
+            Begin
+                Item := Copy(Items, 1, P - 1);
+                Items := Copy(Items, P + 1, Length(Items));
+            End;
+            Item := Trim(Item);
+            If Item = '' Then Continue;
+            P := Pos(':', Item);
+            If P = 0 Then Continue;
+            DesName := Trim(Copy(Item, 1, P - 1));
+            RotStr := Trim(Copy(Item, P + 1, Length(Item)));
+            Inc(Total);
+
+            Comp := Nil;
+            Try Comp := Board.GetPcbComponentByRefDes(DesName); Except End;
+            Slk := Nil;
+            If Comp <> Nil Then
+                Try Slk := Comp.Name; Except End;
+            If (Comp = Nil) Or (Slk = Nil) Then
+            Begin
+                Inc(Missing);
+                If MissingList <> '' Then MissingList := MissingList + ',';
+                MissingList := MissingList + '"' + EscapeJsonString(DesName) + '"';
+                Continue;
+            End;
+
+            OrigAuto := Comp.NameAutoPosition;
+            OrigX := Slk.XLocation;
+            OrigY := Slk.YLocation;
+            OrigRot := Slk.Rotation;
+            Ok := False;
+            While (RotStr <> '') And (Not Ok) Do
+            Begin
+                Q := Pos(',', RotStr);
+                If Q = 0 Then
+                Begin
+                    RotOne := RotStr;
+                    RotStr := '';
+                End
+                Else
+                Begin
+                    RotOne := Copy(RotStr, 1, Q - 1);
+                    RotStr := Copy(RotStr, Q + 1, Length(RotStr));
+                End;
+                If Not IsFloatStr(Trim(RotOne)) Then Continue;
+                Rot := StrToFloatDef(Trim(RotOne), 0);
+                Vertical := (Round(Rot) = 90) Or (Round(Rot) = 270);
+                Comp.BeginModify;
+                Try Slk.Rotation := Rot; Except End;
+                Comp.EndModify;
+                For K := 0 To 7 Do
+                Begin
+                    Comp.BeginModify;
+                    Try Comp.ChangeNameAutoposition(OrientAnchor(Vertical, K)); Except End;
+                    Comp.EndModify;
+                    If Not SilkBlocked(Board, Slk, SilkGap, MaskGap, BL, BB, BR, BT) Then
+                    Begin
+                        Ok := True;
+                        Break;
+                    End;
+                End;
+            End;
+
+            If Ok Then
+            Begin
+                Inc(Placed);
+                If PlacedList <> '' Then PlacedList := PlacedList + ',';
+                PlacedList := PlacedList + '"' + EscapeJsonString(DesName) + '"';
+            End
+            Else
+            Begin
+                Comp.BeginModify;
+                Try Slk.Rotation := OrigRot; Except End;
+                Try Comp.ChangeNameAutoposition(OrigAuto); Except End;
+                If (Slk.XLocation <> OrigX) Or (Slk.YLocation <> OrigY) Then
+                    Slk.MoveToXY(OrigX, OrigY);
+                Comp.EndModify;
+                Inc(Unplaced);
+                If UnplacedList <> '' Then UnplacedList := UnplacedList + ',';
+                UnplacedList := UnplacedList + '"' + EscapeJsonString(DesName) + '"';
+            End;
+        End;
+    Finally
+        PCBServer.PostProcess;
+        Try PCBServer.SystemOptions.DoOnlineDRC := WasOnline; Except End;
+    End;
+
+    If Placed + Unplaced > 0 Then MarkDocDirtyByPath(Board.FileName);
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":' + BoolToJsonStr((Unplaced = 0) And (Missing = 0)) + ','
+        + '"total":' + IntToStr(Total) + ','
+        + '"placed":' + IntToStr(Placed) + ','
+        + '"unplaced":' + IntToStr(Unplaced) + ','
+        + '"missing":' + IntToStr(Missing) + ','
+        + '"placed_designators":[' + PlacedList + '],'
+        + '"unplaced_designators":[' + UnplacedList + '],'
+        + '"missing_designators":[' + MissingList + ']}');
+End;
+
 {..............................................................................}
 { PCB_TuneLength - add approximate routed length to a net by laying a square  }
 { serpentine at a caller-given anchor. Open-loop and NOT DRC-checked: the     }
@@ -17374,6 +17583,7 @@ Begin
         'import_placement':        Result := PCB_ImportPlacement(Params, RequestId);
         'teardrops':               Result := PCB_Teardrops(Params, RequestId);
         'autoplace_silkscreen':    Result := PCB_AutoplaceSilkscreen(Params, RequestId);
+        'orient_designators':      Result := PCB_OrientDesignators(Params, RequestId);
         'tune_length':             Result := PCB_TuneLength(Params, RequestId);
         'panelize':                Result := PCB_Panelize(Params, RequestId);
         'delete_invalid_objects':  Result := PCB_DeleteInvalidObjects(Params, RequestId);
