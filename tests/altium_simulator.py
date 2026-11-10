@@ -350,6 +350,9 @@ class AltiumSimulator:
         #: What the bulk library handlers accepted, so a test can assert
         #: on the PARSED payload rather than only on a success count.
         self.lib_pins: list[dict] = []
+        # The symbol add_pins writes into: the one created last, as
+        # Lib_AddPins's GetTargetLibComponent picks it (#263).
+        self.lib_target: str = ""
         self.lib_symbol_texts: list[dict] = []
         self.lib_pads: list[dict] = []
         self.lib_tracks: list[dict] = []
@@ -898,6 +901,14 @@ class AltiumSimulator:
         elif action == "open":
             return _build_success_response(rid, '{"success":true}')
 
+        elif action == "get_open_projects":
+            items = ['{"project_name":"' + _escape_json_string(p.project_name) + '"'
+                     ',"project_path":"' + _escape_json_string(p.project_path) + '"}'
+                     for p in self.projects]
+            return _build_success_response(
+                rid, '{"projects":[' + ",".join(items) + '],"count":'
+                + str(len(items)) + '}')
+
         elif action == "save":
             project = self._get_project(params)
             if project is None:
@@ -1037,6 +1048,12 @@ class AltiumSimulator:
             data = '{"components":[' + ",".join(items) + '],"count":' + str(count) + '}'
             return _build_success_response(rid, data)
 
+        elif action == "get_variants":
+            # A simulated project has no variants.
+            if self._get_project(params) is None:
+                return _build_error_response(rid, "NO_PROJECT", "No project found")
+            return _build_success_response(rid, '{"variants":[],"count":0}')
+
         elif action == "get_component_info":
             designator = params.get("designator", "")
             if not designator:
@@ -1159,9 +1176,22 @@ class AltiumSimulator:
                 return _build_error_response(rid, "NO_SCHLIB",
                                              "No schematic library is active")
             self.lib_components.append(MockLibComponent(name))
+            self.lib_target = name
             return _build_success_response(
                 rid, '{"success":true,"name":"' + _escape_json_string(name) + '"}'
             )
+
+        elif action == "get_pin_list":
+            # Mirrors Lib_GetPinList: the named symbol's pins, every part.
+            name = params.get("component_name", "")
+            pins = [p for p in self.lib_pins if p.get("component") == name]
+            body = ",".join(
+                '{"designator":"%s","name":"%s"}' % (
+                    _escape_json_string(p["designator"]),
+                    _escape_json_string(p["name"])) for p in pins)
+            return _build_success_response(
+                rid, '{"component":"%s","count":%d,"pins":[%s]}' % (
+                    _escape_json_string(name), len(pins), body))
 
         elif action == "add_pin":
             designator = params.get("designator", "")
@@ -1188,6 +1218,7 @@ class AltiumSimulator:
                 if _get_batch_field(op, "designator").strip():
                     added += 1
                     self.lib_pins.append({
+                        "component": self.lib_target,
                         "designator": _get_batch_field(op, "designator"),
                         "name": _get_batch_field(op, "name"),
                         "electrical_type": _get_batch_field(
@@ -1354,14 +1385,60 @@ class AltiumSimulator:
                 '{"success":true,"footprint":"' + _escape_json_string(fp_name) + '"}'
             )
 
+        elif action == "get_pad_geometry":
+            # Mirrors Lib_GetPadGeometry's reply: every land in millimetres.
+            # The simulator keeps one footprint's pads, sent in mils.
+            def _mm(v):
+                try:
+                    return float(v or 0) * 0.0254
+                except ValueError:
+                    return 0.0
+            rows = []
+            for p in self.lib_pads:
+                rows.append(
+                    '{"name":"' + _escape_json_string(p.get("designator", "")) + '",'
+                    '"x_mm":%.6f,"y_mm":%.6f,"w_mm":%.6f,"h_mm":%.6f,' % (
+                        _mm(p.get("x")), _mm(p.get("y")),
+                        _mm(p.get("x_size")), _mm(p.get("y_size")))
+                    + '"shape":"' + _escape_json_string(p.get("shape", "")) + '",'
+                    + '"rotation":%.3f}' % float(p.get("rotation") or 0))
+            fp = params.get("footprint_name", "")
+            return _build_success_response(
+                rid, '{"name":"' + _escape_json_string(fp) + '","pad_count":'
+                + str(len(rows)) + ',"pads":[' + ",".join(rows) + ']}')
+
         elif action == "link_3d_model":
             model_name = params.get("model_name", "")
             if not model_name:
                 model_path = params.get("model_path", "")
                 model_name = model_path.rsplit("\\", 1)[-1] if "\\" in model_path else model_path.rsplit("/", 1)[-1]
+            bodies = self.__dict__.setdefault("lib_bodies", {})
+            fp = params.get("component_name", "")
+            bodies[fp] = bodies.get(fp, 0) + 1
             return _build_success_response(
                 rid,
                 '{"success":true,"model":"' + _escape_json_string(model_name) + '"}'
+            )
+
+        elif action == "delete_footprint_primitives":
+            # Mirrors Lib_DeleteFootprintPrimitives for 3D bodies, the only
+            # kind the simulator tracks: confirm required, then matched,
+            # removed and leftover counted.
+            fp = params.get("footprint_name", "")
+            if str(params.get("confirm", "")).lower() != "true":
+                return _build_error_response(rid, "CONFIRM_REQUIRED",
+                                             "Pass confirm=true")
+            kind = str(params.get("object_type", "")).lower().replace("_", "")
+            bodies = self.__dict__.setdefault("lib_bodies", {})
+            matched = bodies.get(fp, 0) if kind in ("componentbody", "body") else 0
+            if matched:
+                bodies[fp] = 0
+            return _build_success_response(
+                rid,
+                '{"library":"","footprint":"' + _escape_json_string(fp) + '",'
+                '"matched":' + str(matched) + ',"removed":' + str(matched) + ','
+                '"leftover":0,"hint":"","examined":' + str(matched) + ','
+                '"layers":[],"pads_included":false,"was_current":false}'
             )
 
         elif action == "get_components":
@@ -1644,6 +1721,15 @@ class AltiumSimulator:
             return _build_success_response(
                 rid, '{"action":"' + zoom_action + '"}'
             )
+        elif action == "zoom_to_xy":
+            # Gen_ZoomToXY: x and y required; the reply echoes them.
+            x, y = params.get("x", ""), params.get("y", "")
+            if x == "" or y == "":
+                return _build_error_response(
+                    rid, "MISSING_PARAMS", "x and y parameters are required")
+            return _build_success_response(
+                rid, '{"success":true,"x":' + str(x) + ',"y":' + str(y)
+                + ',"context":"pcb"}')
         else:
             return _build_error_response(
                 rid, "UNKNOWN_ACTION",

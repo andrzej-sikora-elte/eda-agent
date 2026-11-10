@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
+# Copyright (c) 2026 Terrence Henry
 """AD21 TextColor crash: exercise the real guards, not a permissive mock API."""
 from __future__ import annotations
 
@@ -9,7 +11,7 @@ import subprocess
 
 import pytest
 
-from tests.test_sch_properties_match_their_interface import _routine, _source
+from tests.test_sch_properties_match_their_interface import GENERIC, _routine, _source
 
 
 def _assert_textcolor_access(code):
@@ -17,7 +19,7 @@ def _assert_textcolor_access(code):
     assert "Result := False" in capability
     assert "If Obj = Nil Then Exit" in capability
     assert set(re.findall(r"Obj\.ObjectId = (e\w+)", capability)) == {
-        "ePort", "eSheetEntry", "eHarnessEntry"}
+        "ePort", "eSheetEntry", "eHarnessEntry", "eTextFrame", "eNote"}
     # A typed local must be declared and assigned AFTER the capability check.
     for routine in ("GetSchProperty", "SetSchProperty"):
         body = _routine(code, routine)
@@ -27,7 +29,8 @@ def _assert_textcolor_access(code):
         assert not re.search(r"\bObj\.TextColor\b", branch)
         for local, interface in (("PortObj", "ISch_Port"),
                                  ("EntryObj", "ISch_SheetEntry"),
-                                 ("HarnessEntryObj", "ISch_HarnessEntry")):
+                                 ("HarnessEntryObj", "ISch_HarnessEntry"),
+                                 ("FrameObj", "ISch_TextFrame")):
             assert f"{local} : {interface}" in body
             assert guard < branch.index(f"{local} := Obj") < branch.index(f"{local}.TextColor")
         if routine == "GetSchProperty":
@@ -44,8 +47,8 @@ def test_textcolor_uses_only_documented_typed_interfaces():
 def test_textcolor_guard_detects_the_original_defect(mutation):
     code = _source()
     if mutation == "allow_power":
-        code = code.replace("(Obj.ObjectId = eHarnessEntry);",
-                            "(Obj.ObjectId = eHarnessEntry) Or (Obj.ObjectId = ePowerObject);", 1)
+        code = code.replace("(Obj.ObjectId = eHarnessEntry) Or (Obj.ObjectId = eTextFrame)",
+                            "(Obj.ObjectId = eHarnessEntry) Or (Obj.ObjectId = ePowerObject)", 1)
     elif mutation == "raw_read":
         code = code.replace("IntToStr(PortObj.TextColor)", "IntToStr(Obj.TextColor)", 1)
     else:
@@ -98,7 +101,8 @@ def test_production_textcolor_filters_do_not_read_missing_members(tmp_path):
     if not fpc:
         pytest.skip("Free Pascal Compiler (fpc) is not installed or not on PATH")
     names = ("SchObjectHasText", "SchObjectHasIsHidden", "SchObjectHasTextColor",
-             "UnsupportedSchProperty")
+             "SchObjectHasFontId", "SchObjectHasTextFontId", "SchExtraOwner",
+             "SchExtraFits", "UnsupportedSchProperty")
     source = _source()
     guards = "\n".join(_routine(source, name) for name in names)
     types = sorted(set(re.findall(r"\be[A-Z]\w*", guards)) | {"ePowerObject", "eNetLabel"})
@@ -118,6 +122,7 @@ begin
   Inc(Reads);
   if Prop='TextColor' then Result:='128' else Result:='GND';
 end;
+@@HELPERS@@
 @@FILTER@@
 var Obj: ISch_GraphicalObject;
 begin
@@ -140,6 +145,12 @@ begin
 end.
 """.replace("@@CONSTANTS@@", constants).replace("@@GUARDS@@", guards).replace(
         "@@FILTER@@", _routine(source, "MatchesFilter"))
+    # The filter's operator helpers live in Utils.pas.
+    utils = (GENERIC.parent / "Utils.pas").read_text(encoding="utf-8", errors="replace")
+    helpers = "\n".join(_routine(utils, name) for name in (
+        "FilterOpPos", "FilterOpText", "IsFloatStr", "StrToFloatDef", "FilterWildMatch",
+        "FilterOpHolds"))
+    program = program.replace("@@HELPERS@@", helpers)
     path = tmp_path / "textcolor_filters.pas"
     path.write_text(program, encoding="utf-8")
     compiled = subprocess.run([fpc, str(path)], cwd=tmp_path, capture_output=True, text=True)

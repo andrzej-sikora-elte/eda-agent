@@ -267,7 +267,15 @@ def build_altium_plan(
                 f"NOT emitted; lib_add_pins requires a designator and "
                 f"silently discards blanks.")
         if pins:
-            steps.append({"tool": "lib_add_pins", "args": {"pins": pins}})
+            # Pins read from a library, not typed from a pin table: they
+            # carry their own id so a new symbol takes them.
+            from ...design.pin_table import IMPORTED
+            import hashlib
+            imported = "imported-" + hashlib.sha1(
+                repr(pins).encode()).hexdigest()[:12]
+            IMPORTED[imported] = len(pins)
+            steps.append({"tool": "lib_add_pins",
+                          "args": {"pins": pins, "datasheet": {"imported": imported}}})
         else:
             warnings.append("symbol has no pins")
 
@@ -439,8 +447,15 @@ def build_altium_plan(
                 f"Add them by hand, or the board will not be drilled for "
                 f"them.")
         if pads:
+            # Lands read from a vendor library, not drawn by hand: they
+            # carry their own id so a new footprint takes them.
+            from ...design.landpattern.compare_figure import ISSUED
+            import hashlib
+            imported = "imported-" + hashlib.sha1(
+                repr((fp_name, pads)).encode()).hexdigest()[:12]
+            ISSUED[imported] = len(pads)
             steps.append({"tool": "lib_add_footprint_pads",
-                          "args": {"pads": pads}})
+                          "args": {"pads": pads, "compared": imported}})
         else:
             warnings.append("footprint has no pads")
 

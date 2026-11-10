@@ -13,6 +13,566 @@
 { PCB Property Getter, late-bound, returns '' on unsupported properties     }
 {..............................................................................}
 
+{ ---- MORE BOARD PROPERTIES ------------------------------------------------ }
+{ Hole tolerances on pads and vias, barcode and multiline text, dimension     }
+{ text and arrows, the rest of the pour options, and pin / part swapping on  }
+{ a placed part. Each is a GetState_ / SetState_ pair. A      }
+{ length is decimal mils both ways; a choice (BarCodeKind, TextPosition ...)  }
+{ is Altium's own ordinal, read back so a caller can copy one.                }
+
+{ Altium's "no hole tolerance set": the largest 32-bit integer, measured on }
+{ AD 26.11. Worked out here rather than written as a literal, because AD25  }
+{ refuses that literal while compiling (see MaxInt in Main.pas).           }
+Function UnsetTolerance(Dummy : Integer) : Integer;
+Var
+    Half : Integer;
+Begin
+    Half := 1073741823;
+    Result := Half + Half + 1;
+End;
+
+{ Which object type carries an extra property: 1 pad or via, 2 via only,     }
+{ 3 text, 4 dimension, 5 polygon, 6 component, 7 pad only, 8 3D body, 0     }
+{ none of these. A 3D body's OverrideColor says whether its own colour is    }
+{ drawn instead of the model's; Texture is an image file laid on it.          }
+{ 9 a track, arc or via: IsPreRoute (kept by the autorouter) and UserRouted. }
+{ Pads and vias also take the mask modes (PasteMaskExpansionMode,           }
+{ SolderMaskExpansionMode, Altium's numbers: from the rule or manual) and   }
+{ the paste opening as a percentage (PasteMaskUsePercent,                   }
+{ PasteMaskPercent) or switched off (PasteMaskEnabled).                     }
+{ Text ConvertedString is the text as shown, special strings resolved, and  }
+{ UnderlyingString the text as typed (".Layer_Count" stays a link); both   }
+{ are read only. A pad's DrillType is how its hole is made (0 drilled, 1     }
+{ punched, 2 laser, 3 plasma); IsVirtualPin and a part's FlippedOnLayer    }
+{ (its "flip on layer" option, not its side) are read only. A text's       }
+{ BorderSpaceType is Altium's number for how its inverted border is sized. }
+{ A text's TextKind is 0 stroke, 1 TrueType, 2 barcode; FontID picks the   }
+{ stroke font (1 Default, 2 Sans Serif, 3 Serif); FontName is the TrueType }
+{ font and Bold / Italic are TrueType only. InvRectWidth / InvRectHeight   }
+{ are read only: Altium sizes the inverted box itself (text + margin) and  }
+{ ignores a written size; on a multiline text the box is the frame, so    }
+{ the frame (MultilineTextWidth / Height) is what makes a label larger.   }
+{ InvertedTTTextBorder is the margin, a minimum the box never goes below. }
+Function ExtraPCBPropertyOwner(PropName : String) : Integer;
+Begin
+    Result := 0;
+    If (PropName = 'HolePositiveTolerance') Or (PropName = 'HoleNegativeTolerance') Or
+       (PropName = 'PasteMaskExpansionMode') Or (PropName = 'SolderMaskExpansionMode') Or
+       (PropName = 'PasteMaskUsePercent') Or (PropName = 'PasteMaskPercent') Or
+       (PropName = 'PasteMaskEnabled') Then Result := 1
+    Else If PropName = 'IsCounterHole' Then Result := 2
+    Else If (PropName = 'BarCodeKind') Or (PropName = 'BarCodeRenderMode') Or
+            (PropName = 'BarCodeFullWidth') Or (PropName = 'BarCodeFullHeight') Or
+            (PropName = 'BarCodeXMargin') Or (PropName = 'BarCodeYMargin') Or
+            (PropName = 'BarCodeMinWidth') Or (PropName = 'BarCodeInverted') Or
+            (PropName = 'BarCodeShowText') Or (PropName = 'BarCodeFontName') Or
+            (PropName = 'Multiline') Or (PropName = 'MultilineTextWidth') Or
+            (PropName = 'MultilineTextHeight') Or
+            (PropName = 'MultilineTextAutoPosition') Or
+            (PropName = 'Inverted') Or (PropName = 'UseInvertedRectangle') Or
+            (PropName = 'InvertedTTTextBorder') Or
+            (PropName = 'TTFInvertedTextJustify') Or
+            (PropName = 'TTFOffsetFromInvertedRect') Or
+            (PropName = 'ConvertedString') Or (PropName = 'UnderlyingString') Or
+            (PropName = 'BorderSpaceType') Or
+            (PropName = 'FontName') Or (PropName = 'TextKind') Or
+            (PropName = 'FontID') Or (PropName = 'Bold') Or
+            (PropName = 'Italic') Or (PropName = 'InvRectWidth') Or
+            (PropName = 'InvRectHeight') Then Result := 3
+    Else If (PropName = 'TextHeight') Or (PropName = 'TextWidth') Or
+            (PropName = 'TextLineWidth') Or (PropName = 'TextGap') Or
+            (PropName = 'TextPosition') Or (PropName = 'TextDimensionUnit') Or
+            (PropName = 'TextPrecision') Or (PropName = 'TextFormat') Or
+            (PropName = 'TextPrefix') Or (PropName = 'TextSuffix') Or
+            (PropName = 'ArrowSize') Or (PropName = 'ArrowLineWidth') Or
+            (PropName = 'ArrowLength') Or (PropName = 'ArrowPosition') Or
+            (PropName = 'ExtensionOffset') Or (PropName = 'ExtensionLineWidth') Or
+            (PropName = 'ExtensionPickGap') Then Result := 4
+    Else If (PropName = 'PolygonType') Or (PropName = 'BorderWidth') Or
+            (PropName = 'AvoidObsticles') Or (PropName = 'ClipAcuteCorners') Or
+            (PropName = 'MitreCorners') Or (PropName = 'IgnoreViolations') Or
+            (PropName = 'ArcPourMode') Or (PropName = 'DrawRemovedNecks') Or
+            (PropName = 'DrawRemovedIslands') Or (PropName = 'DrawDeadCopper') Or
+            (PropName = 'ExpandOutline') Or (PropName = 'AutoGenerateName') Then Result := 5
+    Else If (PropName = 'EnablePinSwapping') Or (PropName = 'EnablePartSwapping') Or
+            (PropName = 'IsBGA') Or (PropName = 'LockStrings') Or
+            (PropName = 'PrimitiveLock') Or
+            (PropName = 'NameAutoPosition') Or (PropName = 'CommentAutoPosition') Or
+            (PropName = 'FootprintDescription') Or (PropName = 'DefaultPCB3DModel') Or
+            (PropName = 'PackageSpecificHash') Or (PropName = 'SourceDescription') Or
+            (PropName = 'JumpersVisible') Or (PropName = 'ChannelOffset') Or
+            (PropName = 'GroupNum') Or (PropName = 'FlippedOnLayer') Then Result := 6
+    Else If (PropName = 'JumperID') Or (PropName = 'SwapID_Pad') Or
+            (PropName = 'SwapID_Part') Or (PropName = 'SwappedPadName') Or
+            (PropName = 'OwnerPart_ID') Or (PropName = 'DrillType') Or
+            (PropName = 'IsVirtualPin') Then Result := 7
+    Else If (PropName = 'OverrideColor') Or (PropName = 'Texture') Or
+            (PropName = 'TextureRotation') Then Result := 8
+    Else If (PropName = 'IsPreRoute') Or (PropName = 'UserRouted') Then Result := 9;
+End;
+
+{ True when Obj is the type that carries PropName. }
+Function ExtraPCBPropertyFits(Oid : Integer; PropName : String) : Boolean;
+Var
+    Owner : Integer;
+Begin
+    Owner := ExtraPCBPropertyOwner(PropName);
+    Result := ((Owner = 1) And ((Oid = ePadObject) Or (Oid = eViaObject)))
+        Or ((Owner = 2) And (Oid = eViaObject))
+        Or ((Owner = 3) And (Oid = eTextObject))
+        Or ((Owner = 4) And (Oid = eDimensionObject))
+        Or ((Owner = 5) And (Oid = ePolyObject))
+        Or ((Owner = 6) And (Oid = eComponentObject))
+        Or ((Owner = 7) And (Oid = ePadObject))
+        Or ((Owner = 8) And (Oid = eComponentBodyObject))
+        Or ((Owner = 9) And ((Oid = eTrackObject) Or (Oid = eArcObject) Or (Oid = eViaObject)));
+End;
+
+{ The value, '' when Obj is not the type that carries it. }
+Function PCBGetExtra(Obj : IPCB_Primitive; PropName : String) : String;
+Var
+    Pad : IPCB_Pad;
+    Via : IPCB_Via;
+    Txt : IPCB_Text;
+    Dim : IPCB_Dimension;
+    Poly : IPCB_Polygon;
+    Comp : IPCB_Component;
+    Body : IPCB_ComponentBody;
+    Oid, Tol : Integer;
+Begin
+    Result := '';
+    Oid := Obj.ObjectId;
+    If Not ExtraPCBPropertyFits(Oid, PropName) Then Exit;
+    If ExtraPCBPropertyOwner(PropName) = 9 Then
+    Begin
+        If PropName = 'IsPreRoute' Then Result := BoolToJsonStr(Obj.IsPreRoute)
+        Else Result := BoolToJsonStr(Obj.UserRouted);
+        Exit;
+    End;
+    If (PropName = 'PasteMaskExpansionMode') Or (PropName = 'SolderMaskExpansionMode') Or
+       (PropName = 'PasteMaskUsePercent') Or (PropName = 'PasteMaskPercent') Or
+       (PropName = 'PasteMaskEnabled') Then
+    Begin
+        If Oid = ePadObject Then
+        Begin
+            Pad := Obj;
+            If PropName = 'PasteMaskExpansionMode' Then Result := IntToStr(Pad.PasteMaskExpansionMode)
+            Else If PropName = 'SolderMaskExpansionMode' Then Result := IntToStr(Pad.SolderMaskExpansionMode)
+            Else If PropName = 'PasteMaskUsePercent' Then Result := BoolToJsonStr(Pad.PasteMaskUsePercent)
+            Else If PropName = 'PasteMaskPercent' Then Result := FloatToJsonStr(Pad.PasteMaskPercent)
+            Else Result := BoolToJsonStr(Pad.PasteMaskEnabled);
+        End
+        Else
+        Begin
+            Via := Obj;
+            If PropName = 'PasteMaskExpansionMode' Then Result := IntToStr(Via.PasteMaskExpansionMode)
+            Else If PropName = 'SolderMaskExpansionMode' Then Result := IntToStr(Via.SolderMaskExpansionMode)
+            Else If PropName = 'PasteMaskUsePercent' Then Result := BoolToJsonStr(Via.PasteMaskUsePercent)
+            Else If PropName = 'PasteMaskPercent' Then Result := FloatToJsonStr(Via.PasteMaskPercent)
+            Else Result := BoolToJsonStr(Via.PasteMaskEnabled);
+        End;
+        Exit;
+    End;
+    If (PropName = 'HolePositiveTolerance') Or (PropName = 'HoleNegativeTolerance') Then
+    Begin
+        If Oid = ePadObject Then
+        Begin
+            Pad := Obj;
+            If PropName = 'HolePositiveTolerance' Then Tol := Pad.HolePositiveTolerance
+            Else Tol := Pad.HoleNegativeTolerance;
+        End
+        Else
+        Begin
+            Via := Obj;
+            If PropName = 'HolePositiveTolerance' Then Tol := Via.HolePositiveTolerance
+            Else Tol := Via.HoleNegativeTolerance;
+        End;
+        If Tol = UnsetTolerance(0) Then Result := 'unset'
+        Else Result := FloatToJsonStr(CoordToMilsF(Tol));
+    End
+    Else If PropName = 'IsCounterHole' Then
+    Begin
+        Via := Obj;
+        Result := BoolToJsonStr(Via.IsCounterHole);
+    End
+    Else If Oid = eTextObject Then
+    Begin
+        Txt := Obj;
+        If PropName = 'BarCodeKind' Then Result := IntToStr(Txt.BarCodeKind)
+        Else If PropName = 'BarCodeRenderMode' Then Result := IntToStr(Txt.BarCodeRenderMode)
+        Else If PropName = 'BarCodeFullWidth' Then Result := FloatToJsonStr(CoordToMilsF(Txt.BarCodeFullWidth))
+        Else If PropName = 'BarCodeFullHeight' Then Result := FloatToJsonStr(CoordToMilsF(Txt.BarCodeFullHeight))
+        Else If PropName = 'BarCodeXMargin' Then Result := FloatToJsonStr(CoordToMilsF(Txt.BarCodeXMargin))
+        Else If PropName = 'BarCodeYMargin' Then Result := FloatToJsonStr(CoordToMilsF(Txt.BarCodeYMargin))
+        Else If PropName = 'BarCodeMinWidth' Then Result := FloatToJsonStr(CoordToMilsF(Txt.BarCodeMinWidth))
+        Else If PropName = 'BarCodeInverted' Then Result := BoolToJsonStr(Txt.BarCodeInverted)
+        Else If PropName = 'BarCodeShowText' Then Result := BoolToJsonStr(Txt.BarCodeShowText)
+        Else If PropName = 'BarCodeFontName' Then Result := Txt.BarCodeFontName
+        Else If PropName = 'Multiline' Then Result := BoolToJsonStr(Txt.Multiline)
+        Else If PropName = 'MultilineTextWidth' Then Result := FloatToJsonStr(CoordToMilsF(Txt.MultilineTextWidth))
+        Else If PropName = 'MultilineTextHeight' Then Result := FloatToJsonStr(CoordToMilsF(Txt.MultilineTextHeight))
+        Else If PropName = 'MultilineTextAutoPosition' Then Result := IntToStr(Txt.MultilineTextAutoPosition)
+        Else If PropName = 'Inverted' Then Result := BoolToJsonStr(Txt.Inverted)
+        Else If PropName = 'UseInvertedRectangle' Then Result := BoolToJsonStr(Txt.UseInvertedRectangle)
+        Else If PropName = 'InvertedTTTextBorder' Then Result := FloatToJsonStr(CoordToMilsF(Txt.InvertedTTTextBorder))
+        Else If PropName = 'TTFInvertedTextJustify' Then Result := IntToStr(Txt.TTFInvertedTextJustify)
+        Else If PropName = 'TTFOffsetFromInvertedRect' Then Result := FloatToJsonStr(CoordToMilsF(Txt.TTFOffsetFromInvertedRect))
+        Else If PropName = 'ConvertedString' Then Result := Txt.ConvertedString
+        Else If PropName = 'UnderlyingString' Then Result := Txt.UnderlyingString
+        Else If PropName = 'BorderSpaceType' Then Result := IntToStr(Txt.BorderSpaceType)
+        Else If PropName = 'FontName' Then Result := Txt.FontName
+        Else If PropName = 'TextKind' Then Result := IntToStr(Txt.TextKind)
+        Else If PropName = 'FontID' Then Result := IntToStr(Txt.FontID)
+        Else If PropName = 'Bold' Then Result := BoolToJsonStr(Txt.Bold)
+        Else If PropName = 'Italic' Then Result := BoolToJsonStr(Txt.Italic)
+        Else If PropName = 'InvRectWidth' Then Result := FloatToJsonStr(CoordToMilsF(Txt.InvRectWidth))
+        Else If PropName = 'InvRectHeight' Then Result := FloatToJsonStr(CoordToMilsF(Txt.InvRectHeight));
+    End
+    Else If Oid = eDimensionObject Then
+    Begin
+        Dim := Obj;
+        If PropName = 'TextHeight' Then Result := FloatToJsonStr(CoordToMilsF(Dim.TextHeight))
+        Else If PropName = 'TextWidth' Then Result := FloatToJsonStr(CoordToMilsF(Dim.TextWidth))
+        Else If PropName = 'TextLineWidth' Then Result := FloatToJsonStr(CoordToMilsF(Dim.TextLineWidth))
+        Else If PropName = 'TextGap' Then Result := FloatToJsonStr(CoordToMilsF(Dim.TextGap))
+        Else If PropName = 'TextPosition' Then Result := IntToStr(Dim.TextPosition)
+        Else If PropName = 'TextDimensionUnit' Then Result := IntToStr(Dim.TextDimensionUnit)
+        Else If PropName = 'TextPrecision' Then Result := IntToStr(Dim.TextPrecision)
+        Else If PropName = 'TextFormat' Then Result := Dim.TextFormat
+        Else If PropName = 'TextPrefix' Then Result := Dim.TextPrefix
+        Else If PropName = 'TextSuffix' Then Result := Dim.TextSuffix
+        Else If PropName = 'ArrowSize' Then Result := FloatToJsonStr(CoordToMilsF(Dim.ArrowSize))
+        Else If PropName = 'ArrowLineWidth' Then Result := FloatToJsonStr(CoordToMilsF(Dim.ArrowLineWidth))
+        Else If PropName = 'ArrowLength' Then Result := FloatToJsonStr(CoordToMilsF(Dim.ArrowLength))
+        Else If PropName = 'ArrowPosition' Then Result := IntToStr(Dim.ArrowPosition)
+        Else If PropName = 'ExtensionOffset' Then Result := FloatToJsonStr(CoordToMilsF(Dim.ExtensionOffset))
+        Else If PropName = 'ExtensionLineWidth' Then Result := FloatToJsonStr(CoordToMilsF(Dim.ExtensionLineWidth))
+        Else If PropName = 'ExtensionPickGap' Then Result := FloatToJsonStr(CoordToMilsF(Dim.ExtensionPickGap));
+    End
+    Else If Oid = ePolyObject Then
+    Begin
+        Poly := Obj;
+        If PropName = 'PolygonType' Then Result := IntToStr(Poly.PolygonType)
+        Else If PropName = 'BorderWidth' Then Result := FloatToJsonStr(CoordToMilsF(Poly.BorderWidth))
+        Else If PropName = 'AvoidObsticles' Then Result := BoolToJsonStr(Poly.AvoidObsticles)
+        Else If PropName = 'ClipAcuteCorners' Then Result := BoolToJsonStr(Poly.ClipAcuteCorners)
+        Else If PropName = 'MitreCorners' Then Result := BoolToJsonStr(Poly.MitreCorners)
+        Else If PropName = 'IgnoreViolations' Then Result := BoolToJsonStr(Poly.IgnoreViolations)
+        Else If PropName = 'ArcPourMode' Then Result := BoolToJsonStr(Poly.ArcPourMode)
+        Else If PropName = 'DrawRemovedNecks' Then Result := BoolToJsonStr(Poly.DrawRemovedNecks)
+        Else If PropName = 'DrawRemovedIslands' Then Result := BoolToJsonStr(Poly.DrawRemovedIslands)
+        Else If PropName = 'DrawDeadCopper' Then Result := BoolToJsonStr(Poly.DrawDeadCopper)
+        Else If PropName = 'ExpandOutline' Then Result := BoolToJsonStr(Poly.ExpandOutline)
+        Else If PropName = 'AutoGenerateName' Then Result := BoolToJsonStr(Poly.AutoGenerateName);
+    End
+    Else If Oid = eComponentObject Then
+    Begin
+        Comp := Obj;
+        If PropName = 'EnablePinSwapping' Then Result := BoolToJsonStr(Comp.EnablePinSwapping)
+        Else If PropName = 'EnablePartSwapping' Then Result := BoolToJsonStr(Comp.EnablePartSwapping)
+        Else If PropName = 'IsBGA' Then Result := BoolToJsonStr(Comp.IsBGA)
+        Else If PropName = 'LockStrings' Then Result := BoolToJsonStr(Comp.LockStrings)
+        Else If PropName = 'PrimitiveLock' Then Result := BoolToJsonStr(Comp.PrimitiveLock)
+        Else If PropName = 'NameAutoPosition' Then Result := IntToStr(Comp.NameAutoPosition)
+        Else If PropName = 'CommentAutoPosition' Then Result := IntToStr(Comp.CommentAutoPosition)
+        Else If PropName = 'FootprintDescription' Then Result := Comp.FootprintDescription
+        Else If PropName = 'DefaultPCB3DModel' Then Result := Comp.DefaultPCB3DModel
+        Else If PropName = 'PackageSpecificHash' Then Result := Comp.PackageSpecificHash
+        Else If PropName = 'SourceDescription' Then Result := Comp.SourceDescription
+        Else If PropName = 'JumpersVisible' Then Result := BoolToJsonStr(Comp.JumpersVisible)
+        Else If PropName = 'ChannelOffset' Then Result := IntToStr(Comp.ChannelOffset)
+        Else If PropName = 'GroupNum' Then Result := IntToStr(Comp.GroupNum)
+        Else If PropName = 'FlippedOnLayer' Then Result := BoolToJsonStr(Comp.FlippedOnLayer);
+    End
+    Else If ExtraPCBPropertyOwner(PropName) = 7 Then
+    Begin
+        Pad := Obj;
+        If PropName = 'JumperID' Then Result := IntToStr(Pad.JumperID)
+        Else If PropName = 'SwapID_Pad' Then Result := Pad.SwapID_Pad
+        Else If PropName = 'SwapID_Part' Then Result := Pad.SwapID_Part
+        Else If PropName = 'SwappedPadName' Then Result := Pad.SwappedPadName
+        Else If PropName = 'OwnerPart_ID' Then Result := IntToStr(Pad.OwnerPart_ID)
+        Else If PropName = 'DrillType' Then Result := IntToStr(Pad.DrillType)
+        Else If PropName = 'IsVirtualPin' Then Result := BoolToJsonStr(Pad.IsVirtualPin);
+    End
+    Else If ExtraPCBPropertyOwner(PropName) = 8 Then
+    Begin
+        Body := Obj;
+        If PropName = 'OverrideColor' Then Result := BoolToJsonStr(Body.OverrideColor)
+        Else If PropName = 'Texture' Then Result := Body.Texture
+        Else If PropName = 'TextureRotation' Then Result := FloatToJsonStr(Body.TextureRotation);
+    End;
+End;
+
+{ 1 written, 0 Obj is not the type that carries it, -1 refused: a read-only  }
+{ property, a value that is not a number (or true / false), or a negative    }
+{ length. Hole tolerances may be negative.                                   }
+Function PCBSetExtra(Obj : IPCB_Primitive; PropName : String; Value : String) : Integer;
+Var
+    Pad : IPCB_Pad;
+    Via : IPCB_Via;
+    Txt : IPCB_Text;
+    Dim : IPCB_Dimension;
+    Poly : IPCB_Polygon;
+    Comp : IPCB_Component;
+    Body : IPCB_ComponentBody;
+    Oid, Owner, N : Integer;
+    F : Double;
+    B, IsBool, IsText, IsInt : Boolean;
+Begin
+    Result := 0;
+    Oid := Obj.ObjectId;
+    If Not ExtraPCBPropertyFits(Oid, PropName) Then Exit;
+    Result := -1;
+    If (PropName = 'IsCounterHole') Or (PropName = 'IsBGA') Or
+       (PropName = 'PackageSpecificHash') Or (PropName = 'ConvertedString') Or
+       (PropName = 'FlippedOnLayer') Or (PropName = 'IsVirtualPin') Or
+       (PropName = 'InvRectWidth') Or (PropName = 'InvRectHeight') Then Exit;
+    { What the text was typed as; writing Text sets it. }
+    If PropName = 'UnderlyingString' Then Exit;
+    Owner := ExtraPCBPropertyOwner(PropName);
+    If ((PropName = 'HolePositiveTolerance') Or (PropName = 'HoleNegativeTolerance'))
+        And (LowerCase(Value) = 'unset') Then
+    Begin
+        If Oid = ePadObject Then
+        Begin
+            Pad := Obj;
+            If PropName = 'HolePositiveTolerance' Then Pad.HolePositiveTolerance := UnsetTolerance(0)
+            Else Pad.HoleNegativeTolerance := UnsetTolerance(0);
+        End
+        Else
+        Begin
+            Via := Obj;
+            If PropName = 'HolePositiveTolerance' Then Via.HolePositiveTolerance := UnsetTolerance(0)
+            Else Via.HoleNegativeTolerance := UnsetTolerance(0);
+        End;
+        Result := 1;
+        Exit;
+    End;
+    IsBool := (PropName = 'BarCodeInverted') Or (PropName = 'BarCodeShowText') Or
+        (PropName = 'Multiline') Or (PropName = 'AvoidObsticles') Or
+        (PropName = 'ClipAcuteCorners') Or (PropName = 'MitreCorners') Or
+        (PropName = 'IgnoreViolations') Or (PropName = 'ArcPourMode') Or
+        (PropName = 'EnablePinSwapping') Or (PropName = 'EnablePartSwapping') Or
+        (PropName = 'LockStrings') Or (PropName = 'PrimitiveLock') Or
+        (PropName = 'Inverted') Or
+        (PropName = 'UseInvertedRectangle') Or (PropName = 'DrawRemovedNecks') Or
+        (PropName = 'DrawRemovedIslands') Or (PropName = 'DrawDeadCopper') Or
+        (PropName = 'ExpandOutline') Or (PropName = 'AutoGenerateName') Or
+        (PropName = 'JumpersVisible') Or (PropName = 'OverrideColor') Or
+        (PropName = 'PasteMaskUsePercent') Or (PropName = 'PasteMaskEnabled') Or
+        (PropName = 'IsPreRoute') Or (PropName = 'UserRouted') Or
+        (PropName = 'Bold') Or (PropName = 'Italic');
+    IsText := (PropName = 'BarCodeFontName') Or (PropName = 'FontName') Or (PropName = 'TextFormat') Or
+        (PropName = 'TextPrefix') Or (PropName = 'TextSuffix') Or
+        (PropName = 'FootprintDescription') Or (PropName = 'DefaultPCB3DModel') Or
+        (PropName = 'SwapID_Pad') Or (PropName = 'SwapID_Part') Or
+        (PropName = 'SourceDescription') Or (PropName = 'SwappedPadName') Or
+        (PropName = 'Texture');
+    IsInt := (PropName = 'BarCodeKind') Or (PropName = 'BarCodeRenderMode') Or
+        (PropName = 'MultilineTextAutoPosition') Or (PropName = 'TextPosition') Or
+        (PropName = 'TextDimensionUnit') Or (PropName = 'TextPrecision') Or
+        (PropName = 'ArrowPosition') Or (PropName = 'PolygonType') Or
+        (PropName = 'NameAutoPosition') Or (PropName = 'CommentAutoPosition') Or
+        (PropName = 'JumperID') Or (PropName = 'TTFInvertedTextJustify') Or
+        (PropName = 'ChannelOffset') Or (PropName = 'GroupNum') Or
+        (PropName = 'OwnerPart_ID') Or (PropName = 'PasteMaskExpansionMode') Or
+        (PropName = 'SolderMaskExpansionMode') Or (PropName = 'DrillType') Or
+        (PropName = 'BorderSpaceType') Or (PropName = 'TextKind') Or
+        (PropName = 'FontID');
+    B := False;
+    F := 0;
+    N := 0;
+    If IsBool Then
+    Begin
+        If LowerCase(Value) = 'true' Then B := True
+        Else If LowerCase(Value) <> 'false' Then Exit;
+    End
+    Else If Not IsText Then
+    Begin
+        If Not IsFloatStr(Value) Then Exit;
+        F := StrToFloatDef(Value, 0);
+        If IsInt Then
+        Begin
+            If (Round(F) <> F) Or (F < 0) Then Exit;
+            N := Round(F);
+        End
+        Else If (F < 0) And (Owner <> 1) Then Exit;
+    End;
+
+    If Owner = 9 Then
+    Begin
+        If PropName = 'IsPreRoute' Then Obj.IsPreRoute := B
+        Else Obj.UserRouted := B;
+    End
+    Else If (Owner = 1) And ((PropName = 'PasteMaskExpansionMode') Or
+        (PropName = 'SolderMaskExpansionMode') Or (PropName = 'PasteMaskUsePercent') Or
+        (PropName = 'PasteMaskPercent') Or (PropName = 'PasteMaskEnabled')) Then
+    Begin
+        If (PropName = 'PasteMaskPercent') And (F > 100) Then
+        Begin
+            Result := -1;
+            Exit;
+        End;
+        If Oid = ePadObject Then
+        Begin
+            Pad := Obj;
+            If PropName = 'PasteMaskExpansionMode' Then Pad.PasteMaskExpansionMode := N
+            Else If PropName = 'SolderMaskExpansionMode' Then Pad.SolderMaskExpansionMode := N
+            Else If PropName = 'PasteMaskUsePercent' Then Pad.PasteMaskUsePercent := B
+            Else If PropName = 'PasteMaskPercent' Then Pad.PasteMaskPercent := F
+            Else Pad.PasteMaskEnabled := B;
+        End
+        Else
+        Begin
+            Via := Obj;
+            If PropName = 'PasteMaskExpansionMode' Then Via.PasteMaskExpansionMode := N
+            Else If PropName = 'SolderMaskExpansionMode' Then Via.SolderMaskExpansionMode := N
+            Else If PropName = 'PasteMaskUsePercent' Then Via.PasteMaskUsePercent := B
+            Else If PropName = 'PasteMaskPercent' Then Via.PasteMaskPercent := F
+            Else Via.PasteMaskEnabled := B;
+        End;
+    End
+    Else If Owner = 1 Then
+    Begin
+        If Oid = ePadObject Then
+        Begin
+            Pad := Obj;
+            If PropName = 'HolePositiveTolerance' Then Pad.HolePositiveTolerance := MilsToCoordF(F)
+            Else Pad.HoleNegativeTolerance := MilsToCoordF(F);
+        End
+        Else
+        Begin
+            Via := Obj;
+            If PropName = 'HolePositiveTolerance' Then Via.HolePositiveTolerance := MilsToCoordF(F)
+            Else Via.HoleNegativeTolerance := MilsToCoordF(F);
+        End;
+    End
+    Else If Owner = 3 Then
+    Begin
+        Txt := Obj;
+        If PropName = 'BarCodeKind' Then Txt.BarCodeKind := N
+        Else If PropName = 'BarCodeRenderMode' Then Txt.BarCodeRenderMode := N
+        Else If PropName = 'BarCodeFullWidth' Then Txt.BarCodeFullWidth := MilsToCoordF(F)
+        Else If PropName = 'BarCodeFullHeight' Then Txt.BarCodeFullHeight := MilsToCoordF(F)
+        Else If PropName = 'BarCodeXMargin' Then Txt.BarCodeXMargin := MilsToCoordF(F)
+        Else If PropName = 'BarCodeYMargin' Then Txt.BarCodeYMargin := MilsToCoordF(F)
+        Else If PropName = 'BarCodeMinWidth' Then Txt.BarCodeMinWidth := MilsToCoordF(F)
+        Else If PropName = 'BarCodeInverted' Then Txt.BarCodeInverted := B
+        Else If PropName = 'BarCodeShowText' Then Txt.BarCodeShowText := B
+        Else If PropName = 'BarCodeFontName' Then Txt.BarCodeFontName := Value
+        Else If PropName = 'Multiline' Then Txt.Multiline := B
+        Else If PropName = 'MultilineTextWidth' Then Txt.MultilineTextWidth := MilsToCoordF(F)
+        Else If PropName = 'MultilineTextHeight' Then Txt.MultilineTextHeight := MilsToCoordF(F)
+        Else If PropName = 'MultilineTextAutoPosition' Then Txt.MultilineTextAutoPosition := N
+        Else If PropName = 'Inverted' Then Txt.Inverted := B
+        Else If PropName = 'UseInvertedRectangle' Then Txt.UseInvertedRectangle := B
+        Else If PropName = 'InvertedTTTextBorder' Then Txt.InvertedTTTextBorder := MilsToCoordF(F)
+        Else If PropName = 'TTFInvertedTextJustify' Then Txt.TTFInvertedTextJustify := N
+        Else If PropName = 'TTFOffsetFromInvertedRect' Then Txt.TTFOffsetFromInvertedRect := MilsToCoordF(F)
+        Else If PropName = 'BorderSpaceType' Then Txt.BorderSpaceType := N
+        { An empty font name or a kind / stroke font Altium does not have is }
+        { refused rather than written. A TrueType kind keeps the legacy       }
+        { UseTTFonts flag in step, as Altium's own dialog does.               }
+        Else If PropName = 'FontName' Then
+        Begin
+            If Trim(Value) = '' Then Exit;
+            Txt.FontName := Value;
+        End
+        Else If PropName = 'TextKind' Then
+        Begin
+            If N > 2 Then Exit;
+            Txt.TextKind := N;
+            Txt.UseTTFonts := N = 1;
+        End
+        Else If PropName = 'FontID' Then
+        Begin
+            If (N < 1) Or (N > 3) Then Exit;
+            Txt.FontID := N;
+        End
+        Else If PropName = 'Bold' Then Txt.Bold := B
+        Else If PropName = 'Italic' Then Txt.Italic := B;
+    End
+    Else If Owner = 4 Then
+    Begin
+        Dim := Obj;
+        If PropName = 'TextHeight' Then Dim.TextHeight := MilsToCoordF(F)
+        Else If PropName = 'TextWidth' Then Dim.TextWidth := MilsToCoordF(F)
+        Else If PropName = 'TextLineWidth' Then Dim.TextLineWidth := MilsToCoordF(F)
+        Else If PropName = 'TextGap' Then Dim.TextGap := MilsToCoordF(F)
+        Else If PropName = 'TextPosition' Then Dim.TextPosition := N
+        Else If PropName = 'TextDimensionUnit' Then Dim.TextDimensionUnit := N
+        Else If PropName = 'TextPrecision' Then Dim.TextPrecision := N
+        Else If PropName = 'TextFormat' Then Dim.TextFormat := Value
+        Else If PropName = 'TextPrefix' Then Dim.TextPrefix := Value
+        Else If PropName = 'TextSuffix' Then Dim.TextSuffix := Value
+        Else If PropName = 'ArrowSize' Then Dim.ArrowSize := MilsToCoordF(F)
+        Else If PropName = 'ArrowLineWidth' Then Dim.ArrowLineWidth := MilsToCoordF(F)
+        Else If PropName = 'ArrowLength' Then Dim.ArrowLength := MilsToCoordF(F)
+        Else If PropName = 'ArrowPosition' Then Dim.ArrowPosition := N
+        Else If PropName = 'ExtensionOffset' Then Dim.ExtensionOffset := MilsToCoordF(F)
+        Else If PropName = 'ExtensionLineWidth' Then Dim.ExtensionLineWidth := MilsToCoordF(F)
+        Else If PropName = 'ExtensionPickGap' Then Dim.ExtensionPickGap := MilsToCoordF(F);
+    End
+    Else If Owner = 5 Then
+    Begin
+        Poly := Obj;
+        If PropName = 'PolygonType' Then Poly.PolygonType := N
+        Else If PropName = 'BorderWidth' Then Poly.BorderWidth := MilsToCoordF(F)
+        Else If PropName = 'AvoidObsticles' Then Poly.AvoidObsticles := B
+        Else If PropName = 'ClipAcuteCorners' Then Poly.ClipAcuteCorners := B
+        Else If PropName = 'MitreCorners' Then Poly.MitreCorners := B
+        Else If PropName = 'IgnoreViolations' Then Poly.IgnoreViolations := B
+        Else If PropName = 'ArcPourMode' Then Poly.ArcPourMode := B
+        Else If PropName = 'DrawRemovedNecks' Then Poly.DrawRemovedNecks := B
+        Else If PropName = 'DrawRemovedIslands' Then Poly.DrawRemovedIslands := B
+        Else If PropName = 'DrawDeadCopper' Then Poly.DrawDeadCopper := B
+        Else If PropName = 'ExpandOutline' Then Poly.ExpandOutline := B
+        Else If PropName = 'AutoGenerateName' Then Poly.AutoGenerateName := B;
+    End
+    Else If Owner = 6 Then
+    Begin
+        Comp := Obj;
+        If PropName = 'EnablePinSwapping' Then Comp.EnablePinSwapping := B
+        Else If PropName = 'EnablePartSwapping' Then Comp.EnablePartSwapping := B
+        Else If PropName = 'LockStrings' Then Comp.LockStrings := B
+        Else If PropName = 'PrimitiveLock' Then Comp.PrimitiveLock := B
+        { Change*Autoposition moves the text to the anchor as well as       }
+        { recording it; writing NameAutoPosition alone leaves it where it is. }
+        Else If PropName = 'NameAutoPosition' Then Comp.ChangeNameAutoposition(N)
+        Else If PropName = 'CommentAutoPosition' Then Comp.ChangeCommentAutoposition(N)
+        Else If PropName = 'FootprintDescription' Then Comp.FootprintDescription := Value
+        Else If PropName = 'DefaultPCB3DModel' Then Comp.DefaultPCB3DModel := Value
+        Else If PropName = 'SourceDescription' Then Comp.SourceDescription := Value
+        Else If PropName = 'JumpersVisible' Then Comp.JumpersVisible := B
+        Else If PropName = 'ChannelOffset' Then Comp.ChannelOffset := N
+        Else If PropName = 'GroupNum' Then Comp.GroupNum := N;
+    End
+    Else If Owner = 7 Then
+    Begin
+        Pad := Obj;
+        If PropName = 'JumperID' Then Pad.JumperID := N
+        Else If PropName = 'SwapID_Pad' Then Pad.SwapID_Pad := Value
+        Else If PropName = 'SwapID_Part' Then Pad.SwapID_Part := Value
+        Else If PropName = 'SwappedPadName' Then Pad.SwappedPadName := Value
+        Else If PropName = 'OwnerPart_ID' Then Pad.OwnerPart_ID := N
+        Else If PropName = 'DrillType' Then
+        Begin
+            { Drilled, punched, laser or plasma: 0 to 3. }
+            If N > 3 Then Exit;
+            Pad.DrillType := N;
+        End;
+    End
+    Else If Owner = 8 Then
+    Begin
+        Body := Obj;
+        If PropName = 'OverrideColor' Then Body.OverrideColor := B
+        Else If PropName = 'Texture' Then Body.Texture := Value
+        Else If PropName = 'TextureRotation' Then Body.TextureRotation := F;
+    End;
+    Result := 1;
+End;
+
 { WHERE A PCB PRIMITIVE KEEPS ITS POSITION, WHICH IS NOT ONE MEMBER.        }
 {                                                                            }
 { Reading Obj.x off the declared IPCB_Primitive worked for the types that     }
@@ -66,9 +626,16 @@ Begin
         End
         Else If Oid = eComponentBodyObject Then
         Begin
-            Body := Obj;
-            If WantY Then Result := Body.y Else Result := Body.x;
-            Found := True;
+            { IPCB_ComponentBody has no x/y on AD21: even a read inside Try
+              halts the script. Read on 25 and later, where it was measured;
+              elsewhere Bounds* give the extent. The version is asked in an
+              If of its own, before the member is reached. }
+            If AltiumVersionCode(0) >= 2500 Then
+            Begin
+                Body := Obj;
+                If WantY Then Result := Body.y Else Result := Body.x;
+                Found := True;
+            End;
         End
         Else If Oid = eTextObject Then
         Begin
@@ -111,6 +678,399 @@ Begin
     Result := IntToStr(M);
 End;
 
+{ ---- VIAS AND PADS ON A BOARD: mask, tenting, testpoints, stack ----------- }
+{ The library route (library.set_via_properties) reaches much of this on a  }
+{ footprint, and the board route none of it: generic.* on a PcbDoc knew a    }
+{ via's Size and HoleSize and nothing of                                     }
+{ its mask, tenting, testpoint flags or stack. Each helper uses only members  }
+{ that the library route already compiles and has exercised live.            }
+{                                                                            }
+{ THE MASK IS REACHED THROUGH IPCB_Pad. IPCB_Via does not expose the cache;   }
+{ casting the via to a pad and that to the primitive does (issue #60).       }
+{ Assigning Via.SolderMaskExpansion directly on a board via faults in         }
+{ ScriptingSystem.DLL (PCB_SetViaSoldermaskRelief); the cache route is the    }
+{ one that works.                                                            }
+{ SolderMaskExpansion is the TOP value once SolderMaskSeparate is true (the   }
+{ two sides unlinked); with it false that one value serves both sides and    }
+{ the bottom field is a shadow (issue #61). An expansion only takes         }
+{ effect with SolderMaskManual true -- otherwise the design rule wins.        }
+Function PCBGetMask(Obj : IPCB_Primitive; PropName : String) : String;
+Var
+    Via    : IPCB_Via;
+    AsPad  : IPCB_Pad;
+    AsPrim : IPCB_Primitive;
+    Cache  : TPadCache;
+Begin
+    Result := '';
+    If Obj.ObjectId = eViaObject Then
+    Begin
+        Via := Obj;
+        AsPad := Via;
+    End
+    Else If Obj.ObjectId = ePadObject Then
+        AsPad := Obj
+    Else Exit;
+    AsPrim := AsPad;
+    If PropName = 'SolderMaskFromHoleEdge' Then
+    Begin
+        Result := BoolToJsonStr(AsPrim.SolderMaskExpansionFromHoleEdge);
+        Exit;
+    End;
+    Cache := AsPrim.GetState_Cache;
+    If PropName = 'SolderMaskExpansion' Then
+        Result := FloatToJsonStr(CoordToMilsF(Cache.SolderMaskExpansion))
+    Else If PropName = 'SolderMaskBottomExpansion' Then
+        Result := FloatToJsonStr(CoordToMilsF(Cache.SolderMaskBottomExpansion))
+    Else If PropName = 'SolderMaskSeparate' Then
+        Result := BoolToJsonStr(Cache.UseSeparateExpansions)
+    Else If PropName = 'SolderMaskManual' Then
+        Result := BoolToJsonStr(Cache.SolderMaskExpansionValid = eCacheManual);
+End;
+
+{ One field per call, each a fetch-edit-write of the cache. Give them in     }
+{ the order they must land, in one set string: SolderMaskFromHoleEdge and    }
+{ SolderMaskManual BEFORE the expansion values, or the value is measured     }
+{ from the wrong edge or ignored.                                            }
+Function PCBSetMask(Obj : IPCB_Primitive; PropName : String; Value : String) : Boolean;
+Var
+    Via    : IPCB_Via;
+    AsPad  : IPCB_Pad;
+    AsPrim : IPCB_Primitive;
+    Cache  : TPadCache;
+Begin
+    Result := False;
+    If Obj.ObjectId = eViaObject Then
+    Begin
+        Via := Obj;
+        AsPad := Via;
+    End
+    Else If Obj.ObjectId = ePadObject Then
+        AsPad := Obj
+    Else Exit;
+    AsPrim := AsPad;
+    If PropName = 'SolderMaskFromHoleEdge' Then
+    Begin
+        AsPrim.SolderMaskExpansionFromHoleEdge := StrToBool(Value);
+        Result := True;
+        Exit;
+    End;
+    Cache := AsPrim.GetState_Cache;
+    If PropName = 'SolderMaskExpansion' Then
+        Cache.SolderMaskExpansion := MilsToCoordF(StrToFloatDef(Value, 0))
+    Else If PropName = 'SolderMaskBottomExpansion' Then
+        Cache.SolderMaskBottomExpansion := MilsToCoordF(StrToFloatDef(Value, 0))
+    Else If PropName = 'SolderMaskSeparate' Then
+        Cache.UseSeparateExpansions := StrToBool(Value)
+    Else If PropName = 'SolderMaskManual' Then
+    Begin
+        { Back to the rule is eCacheInvalid: Altium recomputes from the    }
+        { design rules. eCacheValid would assert that a rule value already }
+        { sits in the field, which after an override it does not           }
+        { (PCB_ApplyDnpPasteExclusion).                                    }
+        If StrToBool(Value) Then
+            Cache.SolderMaskExpansionValid := eCacheManual
+        Else
+            Cache.SolderMaskExpansionValid := eCacheInvalid;
+    End
+    Else Exit;
+    AsPrim.SetState_Cache := Cache;
+    Result := True;
+End;
+
+{ The four testpoint flags (fabrication / assembly x top / bottom) on a via  }
+{ or a pad, and a via's tenting. The flags are the designer's statement of   }
+{ where a probe may land: READ here, never written.                          }
+Function PCBGetViaFlag(Obj : IPCB_Primitive; PropName : String) : String;
+Var
+    Via : IPCB_Via;
+    Pad : IPCB_Pad;
+Begin
+    Result := '';
+    If Obj.ObjectId = eViaObject Then
+    Begin
+        Via := Obj;
+        If PropName = 'IsTenting_Top' Then Result := BoolToJsonStr(Via.IsTenting_Top)
+        Else If PropName = 'IsTenting_Bottom' Then Result := BoolToJsonStr(Via.IsTenting_Bottom)
+        Else If PropName = 'IsTestpoint_Top' Then Result := BoolToJsonStr(Via.IsTestpoint_Top)
+        Else If PropName = 'IsTestpoint_Bottom' Then Result := BoolToJsonStr(Via.IsTestpoint_Bottom)
+        Else If PropName = 'IsAssyTestpoint_Top' Then Result := BoolToJsonStr(Via.IsAssyTestpoint_Top)
+        Else If PropName = 'IsAssyTestpoint_Bottom' Then Result := BoolToJsonStr(Via.IsAssyTestpoint_Bottom);
+    End
+    Else If Obj.ObjectId = ePadObject Then
+    Begin
+        Pad := Obj;
+        If PropName = 'IsTestpoint_Top' Then Result := BoolToJsonStr(Pad.IsTestpoint_Top)
+        Else If PropName = 'IsTestpoint_Bottom' Then Result := BoolToJsonStr(Pad.IsTestpoint_Bottom)
+        Else If PropName = 'IsAssyTestpoint_Top' Then Result := BoolToJsonStr(Pad.IsAssyTestpoint_Top)
+        Else If PropName = 'IsAssyTestpoint_Bottom' Then Result := BoolToJsonStr(Pad.IsAssyTestpoint_Bottom);
+    End;
+End;
+
+{ A via's or a pad's stack, under the Via dialog's names: simple (one size   }
+{ for every layer), top-middle-bottom, full-stack.                           }
+Function PCBStackName(M : Integer) : String;
+Begin
+    If M = ePadMode_Simple Then Result := 'simple'
+    Else If M = ePadMode_LocalStack Then Result := 'top-middle-bottom'
+    Else If M = ePadMode_ExternalStack Then Result := 'full-stack'
+    Else Result := 'unknown';
+End;
+
+Function PCBGetStack(Obj : IPCB_Primitive; PropName : String) : String;
+Var
+    Via : IPCB_Via;
+    Pad : IPCB_Pad;
+Begin
+    Result := '';
+    If Obj.ObjectId = eViaObject Then
+    Begin
+        Via := Obj;
+        If PropName = 'Mode' Then Result := PCBStackName(Via.Mode)
+        { A simple via stores no middle size: SizeMid reads 0 there, and   }
+        { that is the right answer (the top size serves every layer).      }
+        Else If PropName = 'SizeTop' Then Result := FloatToJsonStr(CoordToMilsF(Via.SizeOnLayer(eTopLayer)))
+        Else If PropName = 'SizeMid' Then Result := FloatToJsonStr(CoordToMilsF(Via.SizeOnLayer(eMidLayers)))
+        Else If PropName = 'SizeBottom' Then Result := FloatToJsonStr(CoordToMilsF(Via.SizeOnLayer(eBottomLayer)));
+    End
+    Else If Obj.ObjectId = ePadObject Then
+    Begin
+        Pad := Obj;
+        If PropName = 'Mode' Then Result := PCBStackName(Pad.Mode);
+    End;
+End;
+
+{ MODE FIRST, in a set string: on a simple via the middle size has nowhere  }
+{ to go until the mode change has exposed it. A middle size cannot be read  }
+{ back reliably (issue #65): the write is not verifiable.                   }
+Function PCBSetStack(Obj : IPCB_Primitive; PropName : String; Value : String) : Integer;
+Var
+    Via : IPCB_Via;
+    Pad : IPCB_Pad;
+    M   : Integer;
+Begin
+    Result := 0;
+    If PropName = 'Mode' Then
+    Begin
+        If Value = 'simple' Then M := ePadMode_Simple
+        Else If Value = 'top-middle-bottom' Then M := ePadMode_LocalStack
+        Else If Value = 'full-stack' Then M := ePadMode_ExternalStack
+        Else Begin Result := -1; Exit; End;
+        If Obj.ObjectId = eViaObject Then Begin Via := Obj; Via.Mode := M; Result := 1; End
+        Else If Obj.ObjectId = ePadObject Then Begin Pad := Obj; Pad.Mode := M; Result := 1; End;
+        Exit;
+    End;
+    If Obj.ObjectId <> eViaObject Then Exit;
+    Via := Obj;
+    If PropName = 'SizeTop' Then Via.SizeOnLayer(eTopLayer) := MilsToCoordF(StrToFloatDef(Value, 0))
+    Else If PropName = 'SizeMid' Then Via.SizeOnLayer(eMidLayers) := MilsToCoordF(StrToFloatDef(Value, 0))
+    Else If PropName = 'SizeBottom' Then Via.SizeOnLayer(eBottomLayer) := MilsToCoordF(StrToFloatDef(Value, 0))
+    Else Exit;
+    Result := 1;
+End;
+
+{ ---- A POLYGON'S POUR SETTINGS (issue #125) ------------------------------ }
+{ The Polygon Pour dialog's fields, under the names Altium's own demo       }
+{ IteratePolygons.pas reads: Grid, TrackSize (hatched), MinTrack,           }
+{ ArcApproximation and NeckWidthThreshold are lengths, decimal mils;        }
+{ IslandAreaThreshold is an area, square mils (the API holds coordinates    }
+{ squared, and one mil is 10000 coordinates, so 1e8 per square mil);        }
+{ PolyHatchStyle and PourOver are the raw ordinals (1 = 45 degrees,         }
+{ 5 = solid; 2 = pour over same-net polygons only), so a copy from one      }
+{ polygon to another is exact whatever the enum's names; UseOctagons is a   }
+{ flag; PourIndex and Poured are read only. The caller has checked it is   }
+{ a polygon (an ePolyObject test here would read as a position resolver).  }
+Function PCBGetPoly(Obj : IPCB_Primitive; PropName : String) : String;
+Var
+    Poly : IPCB_Polygon;
+    Area : Double;
+Begin
+    Result := '';
+    Poly := Obj;
+    If PropName = 'Grid' Then Result := FloatToJsonStr(CoordToMilsF(Poly.Grid))
+    Else If PropName = 'TrackSize' Then Result := FloatToJsonStr(CoordToMilsF(Poly.TrackSize))
+    Else If PropName = 'MinTrack' Then Result := FloatToJsonStr(CoordToMilsF(Poly.MinTrack))
+    Else If PropName = 'ArcApproximation' Then Result := FloatToJsonStr(CoordToMilsF(Poly.ArcApproximation))
+    Else If PropName = 'NeckWidthThreshold' Then Result := FloatToJsonStr(CoordToMilsF(Poly.NeckWidthThreshold))
+    Else If PropName = 'IslandAreaThreshold' Then
+    Begin
+        Area := Poly.IslandAreaThreshold;
+        Result := FloatToJsonStr(Area / 100000000.0);
+    End
+    Else If PropName = 'PolyHatchStyle' Then Result := IntToStr(Poly.PolyHatchStyle)
+    Else If PropName = 'PourOver' Then Result := IntToStr(Poly.PourOver)
+    Else If PropName = 'UseOctagons' Then Result := BoolToJsonStr(Poly.UseOctagons)
+    Else If PropName = 'PourIndex' Then Result := IntToStr(Poly.PourIndex)
+    Else If PropName = 'Poured' Then Result := BoolToJsonStr(Poly.Poured);
+End;
+
+{ True when written. A negative number, a non-number, a fractional or       }
+{ out-of-range ordinal, anything but true / false for UseOctagons and an    }
+{ empty Name are refused and nothing is written. The caller has checked it is a polygon.   }
+{ Nothing here repours: the settings decide what the NEXT pour does, as     }
+{ with RemoveDead and pcb_modify_polygon.                                   }
+Function PCBSetPoly(Obj : IPCB_Primitive; PropName : String; Value : String) : Boolean;
+Var
+    Poly : IPCB_Polygon;
+    F    : Double;
+Begin
+    Result := False;
+    Poly := Obj;
+    If PropName = 'Name' Then
+    Begin
+        If Trim(Value) = '' Then Exit;
+        { A pour with Auto Naming on builds its name from layer, net and    }
+        { index again and the assigned one is lost, while the write answered }
+        { success (issue #150). Typing a name in the Polygon Pour dialog     }
+        { unticks Auto Naming; do the same, then report what the pour holds. }
+        Try Poly.AutoGenerateName := False; Except NoteWriteFailed('polygon AutoGenerateName (Altium may rename it)'); End;
+        Poly.Name := Value;
+        Result := Poly.Name = Value;
+        Exit;
+    End;
+    If PropName = 'UseOctagons' Then
+    Begin
+        If LowerCase(Value) = 'true' Then Poly.UseOctagons := True
+        Else If LowerCase(Value) = 'false' Then Poly.UseOctagons := False
+        Else Exit;
+        Result := True;
+        Exit;
+    End;
+    If Not IsFloatStr(Value) Then Exit;
+    F := StrToFloatDef(Value, -1);
+    If F < 0 Then Exit;
+    If (PropName = 'PolyHatchStyle') Or (PropName = 'PourOver') Then
+    Begin
+        If Round(F) <> F Then Exit;
+        If (PropName = 'PolyHatchStyle') And (Round(F) > 5) Then Exit;
+        If (PropName = 'PourOver') And (Round(F) > 2) Then Exit;
+    End;
+    If PropName = 'Grid' Then Poly.Grid := MilsToCoordF(F)
+    Else If PropName = 'TrackSize' Then Poly.TrackSize := MilsToCoordF(F)
+    Else If PropName = 'MinTrack' Then Poly.MinTrack := MilsToCoordF(F)
+    Else If PropName = 'ArcApproximation' Then Poly.ArcApproximation := MilsToCoordF(F)
+    Else If PropName = 'NeckWidthThreshold' Then Poly.NeckWidthThreshold := MilsToCoordF(F)
+    Else If PropName = 'IslandAreaThreshold' Then Poly.IslandAreaThreshold := F * 100000000.0
+    Else If PropName = 'PolyHatchStyle' Then Poly.PolyHatchStyle := Round(F)
+    Else If PropName = 'PourOver' Then Poly.PourOver := Round(F)
+    Else Exit;
+    Result := True;
+End;
+
+{ ---- A PRIMITIVE'S NET, WRITTEN (issue #126) ------------------------------ }
+{ '' leaves the primitive on no net; a name joins that net, which must       }
+{ already exist. False = no such net, so the caller refuses instead of       }
+{ silently leaving the old net in place. Membership is kept BOTH ways, as   }
+{ BindPrimitiveToNet in PCB.pas does it: Prim.Net alone sets a reference    }
+{ while the net's own collection, which connectivity and pours walk, still  }
+{ holds (or lacks) the object. PCB.pas builds after this unit, so its net   }
+{ helpers cannot be called from here; this is the small copy.               }
+Function PCBSetNet(Obj : IPCB_Primitive; Value : String) : Boolean;
+Var
+    Board  : IPCB_Board;
+    Iter   : IPCB_BoardIterator;
+    NetObj : IPCB_Net;
+    OldNet : IPCB_Net;
+Begin
+    Result := False;
+    NetObj := Nil;
+    If Value <> '' Then
+    Begin
+        Board := GetPCBBoardAnywhere(0);
+        If Board = Nil Then Exit;
+        Iter := Board.BoardIterator_Create;
+        Iter.AddFilter_ObjectSet(MkSet(eNetObject));
+        Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+        Iter.AddFilter_Method(eProcessAll);
+        NetObj := Iter.FirstPCBObject;
+        While NetObj <> Nil Do
+        Begin
+            If NetObj.Name = Value Then Break;
+            NetObj := Iter.NextPCBObject;
+        End;
+        Board.BoardIterator_Destroy(Iter);
+        If NetObj = Nil Then Exit;
+    End;
+    OldNet := Obj.Net;
+    If OldNet <> Nil Then
+    Begin
+        Try OldNet.RemovePCBObject(Obj); Except NoteWriteFailed('take the object off its old net'); End;
+    End;
+    Obj.Net := NetObj;
+    If NetObj <> Nil Then
+    Begin
+        Try NetObj.AddPCBObject(Obj); Except NoteWriteFailed('add the object to its net'); End;
+    End;
+    Result := True;
+End;
+
+{ ---- A PRIMITIVE'S BOX, A BODY'S IDENTIFIER, AND UNIONS ------------------- }
+{ What a board-side 3D envelope needs: the extent of a component's bodies,  }
+{ courtyard and pads, the Identifier a generated body carries, and the      }
+{ union that ties it to its component. X/Y on a body is the first vertex of }
+{ its outline, not its centre, so the box is the only usable extent.         }
+{ NOTE: a pad's box includes its solder-mask expansion; use TopXSize /      }
+{ TopYSize for the copper.                                                  }
+Function PCBGetBounds(Obj : IPCB_Primitive; PropName : String) : String;
+Var
+    Box : TCoordRect;
+Begin
+    Box := Obj.BoundingRectangle;
+    If PropName = 'BoundsLeft' Then Result := FloatToJsonStr(CoordToMilsF(Box.Left))
+    Else If PropName = 'BoundsBottom' Then Result := FloatToJsonStr(CoordToMilsF(Box.Bottom))
+    Else If PropName = 'BoundsRight' Then Result := FloatToJsonStr(CoordToMilsF(Box.Right))
+    Else If PropName = 'BoundsTop' Then Result := FloatToJsonStr(CoordToMilsF(Box.Top))
+    Else Result := '';
+End;
+
+{ A COMPONENT'S UNION IS ITS OWN AND ALL ITS PARTS'. Setting it on the       }
+{ component alone leaves its pads, tracks and bodies out, and the union      }
+{ does not hold. Every layer, Mechanical17 and up included, so the walk    }
+{ uses the IPCB layer set. Called inside the component's own modify         }
+{ bracket (ProcessPCBBoardObjects), so no second one here.                  }
+Procedure PCBSetComponentUnion(Comp : IPCB_Component; UIndex : Integer);
+Var
+    GIter : IPCB_GroupIterator;
+    Prim  : IPCB_Primitive;
+Begin
+    Try Comp.SetState_UnionIndex := UIndex; Except NoteWriteFailed('component UnionIndex'); End;
+    Try Comp.Name.SetState_UnionIndex := UIndex; Except NoteWriteFailed('designator UnionIndex'); End;
+    Try Comp.Comment.SetState_UnionIndex := UIndex; Except NoteWriteFailed('comment UnionIndex'); End;
+    GIter := Comp.GroupIterator_Create;
+    Try
+        { The kinds a component owns that carry a union index, never      }
+        { AllObjects: an unfiltered walk can hand back an object the       }
+        { scripting engine cannot cast, an access violation no Try        }
+        { catches (#44).                                                   }
+        GIter.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject,
+            ePadObject, eViaObject, eFillObject, eRegionObject,
+            eTextObject, eComponentBodyObject));
+        GIter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+        Prim := GIter.FirstPCBObject;
+        While Prim <> Nil Do
+        Begin
+            Prim.BeginModify;
+            Try Prim.SetState_UnionIndex := UIndex; Except NoteWriteFailed('primitive UnionIndex'); End;
+            Prim.EndModify;
+            Prim := GIter.NextPCBObject;
+        End;
+    Finally
+        Comp.GroupIterator_Destroy(GIter);
+    End;
+End;
+
+{ Every primitive carries a union index; a component's is its parts' too. }
+Procedure PCBSetUnion(Obj : IPCB_Primitive; UIndex : Integer);
+Var
+    Comp : IPCB_Component;
+Begin
+    If Obj.ObjectId = eComponentObject Then
+    Begin
+        Comp := Obj;
+        PCBSetComponentUnion(Comp, UIndex);
+    End
+    Else Obj.SetState_UnionIndex := UIndex;
+End;
+
 Function GetPCBProperty(Obj : IPCB_Primitive; PropName : String) : String;
 Var
     Track : IPCB_Track;
@@ -148,6 +1108,13 @@ Begin
         End
         Else If PropName = 'Layer'      Then Result := LayerDisplayName(Obj.Layer)
         Else If PropName = 'Descriptor' Then Result := Obj.Descriptor
+        { Read only, on any board object: Altium's longer description,  }
+        { whether DRC flagged it, its unique id (empty on tracks and     }
+        { vias) and whether it is copper that carries a net.             }
+        Else If PropName = 'DetailString' Then Result := Obj.GetState_DetailString
+        Else If PropName = 'DRCError' Then Result := BoolToJsonStr(Obj.DRCError)
+        Else If PropName = 'UniqueID' Then Result := Obj.UniqueID
+        Else If PropName = 'IsElectricalPrim' Then Result := BoolToJsonStr(Obj.IsElectricalPrim)
         Else If PropName = 'Selected'   Then Result := BoolToJsonStr(Obj.Selected)
         { 'Net.Name' is accepted as well as 'Net'. Designator.Text and
           Comment.Text are already accepted alongside their bare forms,
@@ -158,7 +1125,23 @@ Begin
           stopped, when the property was simply spelled differently. }
         Else If (PropName = 'Net') Or (PropName = 'Net.Name') Then
         Begin
-            If Obj.Net <> Nil Then Result := Obj.Net.Name;
+            { Poured copper carries no net of its own: the pour that made it }
+            { does, the same owner PCB_LayoutModel reads. A poured region    }
+            { read as netless, and a Net filter could not find it.           }
+            If Obj.Net <> Nil Then
+            Begin
+                Result := Obj.Net.Name;
+            End
+            Else
+            Begin
+                If Obj.InPolygon Then
+                Begin
+                    If Obj.Polygon <> Nil Then
+                    Begin
+                        If Obj.Polygon.Net <> Nil Then Result := Obj.Polygon.Net.Name;
+                    End;
+                End;
+            End;
         End
         { WHAT A PRIMITIVE BELONGS TO. The walk below takes every primitive  }
         { on the board, so a footprint's own tracks and a hatched pour's     }
@@ -176,6 +1159,25 @@ Begin
         Else If PropName = 'IsKeepout' Then
         Begin
             Result := BoolToJsonStr(Obj.IsKeepout);
+        End
+        { What a keepout keeps out: the Keepout Restrictions in the       }
+        { Properties panel. Copper alone is a wall polygons stop at while }
+        { tracks, vias and pads may still cross it.                       }
+        { Only asked of the four objects that have them: asked of a via,  }
+        { the property raised 'Undeclared identifier' as a modal.          }
+        Else If (PropName = 'IsKeepoutForCopper') Or (PropName = 'IsKeepoutForTrack') Or
+                (PropName = 'IsKeepoutForVia') Or (PropName = 'IsKeepoutForSMDPad') Or
+                (PropName = 'IsKeepoutForTHPad') Then
+        Begin
+            If (Oid = eTrackObject) Or (Oid = eArcObject) Or (Oid = eFillObject) Or
+               (Oid = eRegionObject) Then
+            Begin
+                If PropName = 'IsKeepoutForCopper' Then Result := BoolToJsonStr(Obj.IsKeepoutForCopper);
+                If PropName = 'IsKeepoutForTrack' Then Result := BoolToJsonStr(Obj.IsKeepoutForTrack);
+                If PropName = 'IsKeepoutForVia' Then Result := BoolToJsonStr(Obj.IsKeepoutForVia);
+                If PropName = 'IsKeepoutForSMDPad' Then Result := BoolToJsonStr(Obj.IsKeepoutForSMDPad);
+                If PropName = 'IsKeepoutForTHPad' Then Result := BoolToJsonStr(Obj.IsKeepoutForTHPad);
+            End;
         End
         Else If PropName = 'TearDrop' Then
         Begin
@@ -219,11 +1221,11 @@ Begin
         End
         Else If PropName = 'Layer1' Then
         Begin
-            If Oid = eConnectionObject Then Begin Conn := Obj; Result := GetLayerString(Conn.Layer1); End;
+            If Oid = eConnectionObject Then Begin Conn := Obj; Result := LayerDisplayName(Conn.Layer1); End;
         End
         Else If PropName = 'Layer2' Then
         Begin
-            If Oid = eConnectionObject Then Begin Conn := Obj; Result := GetLayerString(Conn.Layer2); End;
+            If Oid = eConnectionObject Then Begin Conn := Obj; Result := LayerDisplayName(Conn.Layer2); End;
         End
         Else If PropName = 'IsRedundant' Then
         Begin
@@ -231,7 +1233,31 @@ Begin
         End
         Else If PropName = 'Mode' Then
         Begin
-            If Oid = eConnectionObject Then Begin Conn := Obj; Result := PCBConnMode(Conn); End;
+            If Oid = eConnectionObject Then Begin Conn := Obj; Result := PCBConnMode(Conn); End
+            Else If (Oid = eViaObject) Or (Oid = ePadObject) Then Result := PCBGetStack(Obj, PropName);
+        End
+        Else If (PropName = 'SizeTop') Or (PropName = 'SizeMid') Or
+                (PropName = 'SizeBottom') Then
+            Result := PCBGetStack(Obj, PropName)
+        Else If (PropName = 'SolderMaskExpansion') Or
+                (PropName = 'SolderMaskBottomExpansion') Or
+                (PropName = 'SolderMaskSeparate') Or
+                (PropName = 'SolderMaskManual') Or
+                (PropName = 'SolderMaskFromHoleEdge') Then
+            Result := PCBGetMask(Obj, PropName)
+        Else If (PropName = 'IsTenting_Top') Or (PropName = 'IsTenting_Bottom') Or
+                (PropName = 'IsTestpoint_Top') Or (PropName = 'IsTestpoint_Bottom') Or
+                (PropName = 'IsAssyTestpoint_Top') Or
+                (PropName = 'IsAssyTestpoint_Bottom') Then
+            Result := PCBGetViaFlag(Obj, PropName)
+        Else If (PropName = 'BoundsLeft') Or (PropName = 'BoundsBottom') Or
+                (PropName = 'BoundsRight') Or (PropName = 'BoundsTop') Then
+            Result := PCBGetBounds(Obj, PropName)
+        Else If PropName = 'UnionIndex' Then
+            Result := IntToStr(Obj.UnionIndex)
+        Else If PropName = 'Identifier' Then
+        Begin
+            If Oid = eComponentBodyObject Then Begin Body := Obj; Result := Body.Identifier; End;
         End
         Else If PropName = 'Width' Then
         Begin
@@ -241,15 +1267,15 @@ Begin
         End
         Else If PropName = 'XCenter' Then
         Begin
-            If Oid = eArcObject Then Begin Arc := Obj; Result := IntToStr(CoordToMils(Arc.XCenter)); End;
+            If Oid = eArcObject Then Begin Arc := Obj; Result := FloatToJsonStr(CoordToMilsF(Arc.XCenter)); End;
         End
         Else If PropName = 'YCenter' Then
         Begin
-            If Oid = eArcObject Then Begin Arc := Obj; Result := IntToStr(CoordToMils(Arc.YCenter)); End;
+            If Oid = eArcObject Then Begin Arc := Obj; Result := FloatToJsonStr(CoordToMilsF(Arc.YCenter)); End;
         End
         Else If PropName = 'Radius' Then
         Begin
-            If Oid = eArcObject Then Begin Arc := Obj; Result := IntToStr(CoordToMils(Arc.Radius)); End;
+            If Oid = eArcObject Then Begin Arc := Obj; Result := FloatToJsonStr(CoordToMilsF(Arc.Radius)); End;
         End
         Else If PropName = 'StartAngle' Then
         Begin
@@ -276,6 +1302,55 @@ Begin
         Begin
             If Oid = ePadObject Then Begin Pad := Obj; Result := IntToStr(Pad.TopShape); End;
         End
+        { The bottom copper: a simple pad's top size serves every layer, a  }
+        { stacked one keeps its own.                                       }
+        { The same shape as a word, with the comparisons the library pad   }
+        { reader makes (get_pad_geometry): the ordinal is not documented.  }
+        Else If PropName = 'TopShapeName' Then
+        Begin
+            If Oid = ePadObject Then
+            Begin
+                Pad := Obj;
+                If Pad.TopShape = eRectangular Then Result := 'rectangular'
+                Else If Pad.TopShape = eOctagonal Then Result := 'octagonal'
+                Else If Pad.TopShape = eRoundedRectangular Then Result := 'roundrectangle'
+                Else If ShapeIsCustom(Pad.TopShape) Then Result := 'custom'
+                Else Result := 'round';
+            End;
+        End
+        Else If PropName = 'BotXSize' Then
+        Begin
+            If Oid = ePadObject Then Begin Pad := Obj; Result := FloatToJsonStr(CoordToMilsF(Pad.BotXSize)); End;
+        End
+        Else If PropName = 'BotYSize' Then
+        Begin
+            If Oid = ePadObject Then Begin Pad := Obj; Result := FloatToJsonStr(CoordToMilsF(Pad.BotYSize)); End;
+        End
+        Else If PropName = 'Plated' Then
+        Begin
+            If Oid = ePadObject Then Begin Pad := Obj; Result := BoolToJsonStr(Pad.Plated); End;
+        End
+        { A pad's drill: round, square or slot. For a slot HoleSize is its }
+        { width and HoleWidth its overall length; HoleRotation turns the   }
+        { drill within the pad, on top of the pad's own Rotation.          }
+        Else If PropName = 'HoleType' Then
+        Begin
+            If Oid = ePadObject Then
+            Begin
+                Pad := Obj;
+                If Pad.HoleType = eSlotHole Then Result := 'slot'
+                Else If Pad.HoleType = eSquareHole Then Result := 'square'
+                Else Result := 'round';
+            End;
+        End
+        Else If PropName = 'HoleWidth' Then
+        Begin
+            If Oid = ePadObject Then Begin Pad := Obj; Result := FloatToJsonStr(CoordToMilsF(Pad.HoleWidth)); End;
+        End
+        Else If PropName = 'HoleRotation' Then
+        Begin
+            If Oid = ePadObject Then Begin Pad := Obj; Result := FloatToJsonStr(Pad.HoleRotation); End;
+        End
         Else If PropName = 'Size' Then
         Begin
             If Oid = eViaObject Then Begin Via := Obj; Result := FloatToJsonStr(CoordToMilsF(Via.Size)); End
@@ -295,6 +1370,30 @@ Begin
         Begin
             If Oid = eComponentObject Then Begin Comp := Obj; Result := Comp.SourceDesignator; End;
         End
+        { The schematic link of a placed part: the UniqueId of the symbol it }
+        { came from and the sheet-symbol path above it, the pair a multi-   }
+        { channel design needs to tell its copies apart. A board part has   }
+        { no UniqueId of its own that the schematic matches on.             }
+        Else If PropName = 'SourceUniqueId' Then
+        Begin
+            If Oid = eComponentObject Then Begin Comp := Obj; Result := Comp.SourceUniqueId; End;
+        End
+        Else If PropName = 'SourceHierarchicalPath' Then
+        Begin
+            If Oid = eComponentObject Then Begin Comp := Obj; Result := Comp.SourceHierarchicalPath; End;
+        End
+        Else If PropName = 'SourceLibReference' Then
+        Begin
+            If Oid = eComponentObject Then Begin Comp := Obj; Result := Comp.SourceLibReference; End;
+        End
+        Else If PropName = 'SourceFootprintLibrary' Then
+        Begin
+            If Oid = eComponentObject Then Begin Comp := Obj; Result := Comp.SourceFootprintLibrary; End;
+        End
+        Else If PropName = 'SourceComponentLibrary' Then
+        Begin
+            If Oid = eComponentObject Then Begin Comp := Obj; Result := Comp.SourceComponentLibrary; End;
+        End
         Else If PropName = 'Name' Then
         Begin
             { Component Name is an IPCB_Text; return its .Text, not the object }
@@ -303,6 +1402,10 @@ Begin
             { so a Name=1 filter matched no pad at all.                        }
             If Oid = eComponentObject Then Begin Comp := Obj; Result := Comp.Name.Text; End;
             If Oid = ePadObject Then Begin Pad := Obj; Result := Pad.Name; End;
+            { A region's Name: a plain string (IterateRegions.pas reads it). }
+            If Oid = eRegionObject Then Begin Rgn := Obj; Result := Rgn.Name; End;
+            { A polygon's Name, as the Polygon Pour dialog shows it (#125). }
+            If Oid = ePolyObject Then Begin Poly := Obj; Result := Poly.Name; End;
         End
         Else If (PropName = 'Designator') Or (PropName = 'Designator.Text') Then
         Begin
@@ -366,15 +1469,26 @@ Begin
             If Oid = ePolyObject Then
             Begin Poly := Obj; Result := BoolToJsonStr(Poly.RemoveIslandsByArea); End;
         End
+        { The rest of the Polygon Pour dialog (issue #125), see PCBGetPoly. }
+        Else If (PropName = 'Grid') Or (PropName = 'TrackSize') Or
+                (PropName = 'MinTrack') Or (PropName = 'ArcApproximation') Or
+                (PropName = 'NeckWidthThreshold') Or
+                (PropName = 'IslandAreaThreshold') Or
+                (PropName = 'PolyHatchStyle') Or (PropName = 'PourOver') Or
+                (PropName = 'UseOctagons') Or (PropName = 'PourIndex') Or
+                (PropName = 'Poured') Then
+        Begin
+            If Oid = ePolyObject Then Result := PCBGetPoly(Obj, PropName);
+        End
         Else If PropName = 'StandoffHeight' Then
         Begin
             If Oid = eComponentBodyObject Then
-            Begin Body := Obj; Result := IntToStr(CoordToMils(Body.StandoffHeight)); End;
+            Begin Body := Obj; Result := FloatToJsonStr(CoordToMilsF(Body.StandoffHeight)); End;
         End
         Else If PropName = 'OverallHeight' Then
         Begin
             If Oid = eComponentBodyObject Then
-            Begin Body := Obj; Result := IntToStr(CoordToMils(Body.OverallHeight)); End;
+            Begin Body := Obj; Result := FloatToJsonStr(CoordToMilsF(Body.OverallHeight)); End;
         End
         { A body's opacity, 0 (clear) to 1 (solid), as the Properties panel  }
         { shows it divided by 100. BodyOpacity3D is the member several      }
@@ -394,6 +1508,8 @@ Begin
           Returned as a word rather than an ordinal. The numbers are not
           documented anywhere this project can verify, and publishing an
           unverified number invites a caller to write it back. }
+        Else If ExtraPCBPropertyOwner(PropName) > 0 Then
+            Result := PCBGetExtra(Obj, PropName)
         Else If (PropName = 'Kind') Or (PropName = 'RegionKind') Then
         Begin
             If Oid = eRegionObject Then
@@ -465,10 +1581,20 @@ Begin
     Result := (PropName = 'X') Or (PropName = 'Y') Or (PropName = 'X1') Or
         (PropName = 'Y1') Or (PropName = 'X2') Or (PropName = 'Y2') Or
         (PropName = 'Width') Or (PropName = 'HoleSize') Or
+        (PropName = 'XCenter') Or (PropName = 'YCenter') Or (PropName = 'Radius') Or
         (PropName = 'TopXSize') Or (PropName = 'TopYSize') Or
         (PropName = 'StandoffHeight') Or (PropName = 'OverallHeight') Or
         (PropName = 'Height') Or (PropName = 'StrokeWidth') Or
-        (PropName = 'Size');
+        (PropName = 'Size') Or (PropName = 'BotXSize') Or
+        (PropName = 'BotYSize') Or (PropName = 'HoleWidth') Or
+        (PropName = 'SizeTop') Or (PropName = 'SizeMid') Or
+        (PropName = 'SizeBottom') Or (PropName = 'SolderMaskExpansion') Or
+        (PropName = 'SolderMaskBottomExpansion') Or
+        (PropName = 'BoundsLeft') Or (PropName = 'BoundsBottom') Or
+        (PropName = 'BoundsRight') Or (PropName = 'BoundsTop') Or
+        (PropName = 'Grid') Or (PropName = 'TrackSize') Or
+        (PropName = 'MinTrack') Or (PropName = 'ArcApproximation') Or
+        (PropName = 'NeckWidthThreshold');
 End;
 
 { A text's height or stroke width, inside the modify bracket Altium wants: }
@@ -541,6 +1667,7 @@ End;
 Function SetPCBProperty(Obj : IPCB_Primitive; PropName : String; Value : String) : Integer;
 Var
     Track : IPCB_Track;
+    Arc   : IPCB_Arc;
     Pad   : IPCB_Pad;
     Via   : IPCB_Via;
     Comp  : IPCB_Component;
@@ -603,6 +1730,9 @@ Begin
         End
         Else If PropName = 'Layer'    Then SetPrimitiveLayerByName(Obj, Value)
         Else If PropName = 'Selected' Then Obj.Selected := StrToBool(Value)
+        { Locked is read as Not Moveable, so it is written the same way;   }
+        { PCB_LockNetRouting writes Moveable on any primitive already.      }
+        Else If PropName = 'Locked' Then Obj.Moveable := Not StrToBool(Value)
         { Subtype members: narrow to a typed local via ObjectId first. }
         Else If PropName = 'X1' Then
         Begin
@@ -627,13 +1757,46 @@ Begin
         Else If PropName = 'Width' Then
         Begin
             If Oid = eTrackObject Then Begin Track := Obj; Track.Width := MilsToCoordF(StrToFloatDef(Value, 0)); End
+            Else If Oid = eArcObject Then Begin Arc := Obj; Arc.LineWidth := MilsToCoordF(StrToFloatDef(Value, 0)); End
             Else If Oid = eTextObject Then Begin Txt := Obj; SetTextGeometry(Txt, False, MilsToCoordF(StrToFloatDef(Value, 0))); End
+            Else Matched := False;
+        End
+        { AN ARC'S GEOMETRY. Readable from the start and not writable, so   }
+        { a footprint's pin-1 dot could be read wrong and not put right.    }
+        { The same members the reader uses, inside the caller's modify      }
+        { bracket, on free arcs and on a placed part's arcs alike.          }
+        Else If PropName = 'XCenter' Then
+        Begin
+            If Oid = eArcObject Then Begin Arc := Obj; Arc.XCenter := MilsToCoordF(StrToFloatDef(Value, 0)); End
+            Else Matched := False;
+        End
+        Else If PropName = 'YCenter' Then
+        Begin
+            If Oid = eArcObject Then Begin Arc := Obj; Arc.YCenter := MilsToCoordF(StrToFloatDef(Value, 0)); End
+            Else Matched := False;
+        End
+        Else If PropName = 'Radius' Then
+        Begin
+            If Oid = eArcObject Then Begin Arc := Obj; Arc.Radius := MilsToCoordF(StrToFloatDef(Value, 0)); End
+            Else Matched := False;
+        End
+        Else If PropName = 'StartAngle' Then
+        Begin
+            If Oid = eArcObject Then Begin Arc := Obj; Arc.StartAngle := StrToFloatDef(Value, 0); End
+            Else Matched := False;
+        End
+        Else If PropName = 'EndAngle' Then
+        Begin
+            If Oid = eArcObject Then Begin Arc := Obj; Arc.EndAngle := StrToFloatDef(Value, 0); End
             Else Matched := False;
         End
         Else If PropName = 'Rotation' Then
         Begin
             If Oid = eComponentObject Then Begin Comp := Obj; Comp.Rotation := StrToFloatDef(Value, 0); End
             Else If Oid = ePadObject Then Begin Pad := Obj; Pad.Rotation := StrToFloatDef(Value, 0); End
+            { A free text, or a component's designator / comment text: the   }
+            { same member PCB_PlaceText and the layout copy already write.    }
+            Else If Oid = eTextObject Then Begin Txt := Obj; Txt.Rotation := StrToFloatDef(Value, 0); End
             Else Matched := False;
         End
         { A VIA'S HOLE AND DIAMETER. HoleSize had a pad branch only, and a   }
@@ -685,6 +1848,87 @@ Begin
             If Oid = ePadObject Then Begin Pad := Obj; Pad.TopYSize := MilsToCoordF(StrToFloatDef(Value, 0)); End
             Else Matched := False;
         End
+        Else If PropName = 'BotXSize' Then
+        Begin
+            If Oid = ePadObject Then Begin Pad := Obj; Pad.BotXSize := MilsToCoordF(StrToFloatDef(Value, 0)); End
+            Else Matched := False;
+        End
+        Else If PropName = 'BotYSize' Then
+        Begin
+            If Oid = ePadObject Then Begin Pad := Obj; Pad.BotYSize := MilsToCoordF(StrToFloatDef(Value, 0)); End
+            Else Matched := False;
+        End
+        Else If PropName = 'Plated' Then
+        Begin
+            If Oid = ePadObject Then Begin Pad := Obj; Pad.Plated := StrToBool(Value); End
+            Else Matched := False;
+        End
+        { The drill: round, square or slot, by name. Give HoleType BEFORE  }
+        { HoleSize and HoleWidth in one set string, so a slot is a slot    }
+        { when its length is written.                                       }
+        Else If PropName = 'HoleType' Then
+        Begin
+            If Oid <> ePadObject Then Matched := False
+            Else
+            Begin
+                Pad := Obj;
+                If LowerCase(Value) = 'round' Then Pad.HoleType := eRoundHole
+                Else If LowerCase(Value) = 'square' Then Pad.HoleType := eSquareHole
+                Else If LowerCase(Value) = 'slot' Then Pad.HoleType := eSlotHole
+                Else Refused := True;
+            End;
+        End
+        Else If PropName = 'HoleWidth' Then
+        Begin
+            If Oid = ePadObject Then Begin Pad := Obj; Pad.HoleWidth := MilsToCoordF(StrToFloatDef(Value, 0)); End
+            Else Matched := False;
+        End
+        Else If PropName = 'HoleRotation' Then
+        Begin
+            If Oid <> ePadObject Then Matched := False
+            Else If Not IsFloatStr(Value) Then Refused := True
+            Else Begin Pad := Obj; Pad.HoleRotation := StrToFloatDef(Value, 0); End;
+        End
+        Else If (PropName = 'SolderMaskExpansion') Or
+                (PropName = 'SolderMaskBottomExpansion') Or
+                (PropName = 'SolderMaskSeparate') Or
+                (PropName = 'SolderMaskManual') Or
+                (PropName = 'SolderMaskFromHoleEdge') Then
+        Begin
+            If (Oid <> eViaObject) And (Oid <> ePadObject) Then Matched := False
+            Else If Not PCBSetMask(Obj, PropName, Value) Then Refused := True;
+        End
+        { Tenting is a via property and goes through the via interface, in }
+        { the property form (the method form broke a unit, Library.pas).    }
+        { Several Altium versions cannot set the bottom while the two mask  }
+        { sides are linked: unlink first (SolderMaskSeparate=true), tent,    }
+        { then relink -- the order is the caller's, in one set string.       }
+        Else If PropName = 'IsTenting_Top' Then
+        Begin
+            If Oid = eViaObject Then Begin Via := Obj; Via.IsTenting_Top := StrToBool(Value); End
+            Else Matched := False;
+        End
+        Else If PropName = 'IsTenting_Bottom' Then
+        Begin
+            If Oid = eViaObject Then Begin Via := Obj; Via.IsTenting_Bottom := StrToBool(Value); End
+            Else Matched := False;
+        End
+        Else If (PropName = 'Mode') Or (PropName = 'SizeTop') Or
+                (PropName = 'SizeMid') Or (PropName = 'SizeBottom') Then
+        Begin
+            PosVal := PCBSetStack(Obj, PropName, Value);
+            If PosVal = 0 Then Matched := False
+            Else If PosVal < 0 Then Refused := True;
+        End
+        { A union ties objects so they move together: the 3D envelope to its }
+        { component. On a component it is set on the component and every one }
+        { of its parts; 0 breaks it.                                         }
+        Else If PropName = 'UnionIndex' Then
+        Begin
+            If (Not IsFloatStr(Value)) Or (StrToFloatDef(Value, -1) < 0) Then
+                Refused := True
+            Else PCBSetUnion(Obj, Round(StrToFloatDef(Value, 0)));
+        End
         Else If PropName = 'Text' Then
         Begin
             If Oid = eTextObject Then Begin Txt := Obj; Txt.Text := Value; End
@@ -702,13 +1946,27 @@ Begin
                 SetTextMirrorInPlace(Txt, LowerCase(Value) = 'true');
             End;
         End
+        { A polygon's Name, as the Polygon Pour dialog shows it (issue     }
+        { #125). An empty one is refused.                                   }
+        Else If (PropName = 'Name') And (Oid = ePolyObject) Then
+        Begin
+            If Trim(Value) = '' Then Refused := True
+            Else If Not PCBSetPoly(Obj, PropName, Value) Then Matched := False;
+        End
         { A pad's Name is its designator, written the way the footprint    }
         { tools write it. An empty name would leave a pad no pin can match }
         { and is refused. A component's designator is not settable from a  }
         { script, so Name and Designator stay unknown for components.      }
+        { A region's Name is a tag a tool finds its own regions by again   }
+        { (GenerateSamples.pas writes it); empty is allowed and clears it.  }
         Else If (PropName = 'Name') Or (PropName = 'Designator') Then
         Begin
-            If Oid <> ePadObject Then
+            If (Oid = eRegionObject) And (PropName = 'Name') Then
+            Begin
+                Rgn := Obj;
+                Rgn.Name := Value;
+            End
+            Else If Oid <> ePadObject Then
                 Matched := False
             Else If Trim(Value) = '' Then
                 Refused := True
@@ -717,6 +1975,21 @@ Begin
                 Pad := Obj;
                 Pad.Name := Value;
             End;
+        End
+        { A primitive's net (issue #126): '' leaves it on no net, a name     }
+        { joins that existing net, an unknown name is refused, never         }
+        { ignored. Exploding a polygon leaves its net on every region it     }
+        { made; this is how a caller takes it off again. Only copper that    }
+        { carries a net takes it; every other type is not matched.           }
+        Else If (PropName = 'Net') Or (PropName = 'Net.Name') Then
+        Begin
+            If (Oid = eTrackObject) Or (Oid = eArcObject) Or (Oid = eViaObject) Or
+               (Oid = ePadObject) Or (Oid = eFillObject) Or (Oid = eRegionObject) Or
+               (Oid = ePolyObject) Then
+            Begin
+                If Not PCBSetNet(Obj, Value) Then Refused := True;
+            End
+            Else Matched := False;
         End
         { A text's height and stroke width: silkscreen designator size is a }
         { fabrication requirement, and only the create path could set it.   }
@@ -799,6 +2072,25 @@ Begin
             End
             Else Matched := False;
         End
+        { A keepout and what it keeps out, on the four objects Altium makes   }
+        { keepouts of. IsKeepout turns a placed track, arc, fill or region    }
+        { into one; the five restrictions follow the Properties panel.       }
+        Else If (PropName = 'IsKeepout') Or (PropName = 'IsKeepoutForCopper') Or
+                (PropName = 'IsKeepoutForTrack') Or (PropName = 'IsKeepoutForVia') Or
+                (PropName = 'IsKeepoutForSMDPad') Or (PropName = 'IsKeepoutForTHPad') Then
+        Begin
+            If (Oid = eTrackObject) Or (Oid = eArcObject) Or (Oid = eFillObject) Or
+               (Oid = eRegionObject) Then
+            Begin
+                If PropName = 'IsKeepout' Then Obj.IsKeepout := StrToBool(Value);
+                If PropName = 'IsKeepoutForCopper' Then Obj.IsKeepoutForCopper := StrToBool(Value);
+                If PropName = 'IsKeepoutForTrack' Then Obj.IsKeepoutForTrack := StrToBool(Value);
+                If PropName = 'IsKeepoutForVia' Then Obj.IsKeepoutForVia := StrToBool(Value);
+                If PropName = 'IsKeepoutForSMDPad' Then Obj.IsKeepoutForSMDPad := StrToBool(Value);
+                If PropName = 'IsKeepoutForTHPad' Then Obj.IsKeepoutForTHPad := StrToBool(Value);
+            End
+            Else Matched := False;
+        End
         Else If PropName = 'RemoveDead' Then
         Begin
             If Oid = ePolyObject Then
@@ -816,6 +2108,24 @@ Begin
             If Oid = ePolyObject Then
             Begin Poly := Obj; Poly.RemoveIslandsByArea := StrToBool(Value); End
             Else Matched := False;
+        End
+        { The rest of the Polygon Pour dialog (issue #125), see PCBSetPoly. }
+        { PourIndex and Poured are read only and deliberately absent.       }
+        Else If (PropName = 'Grid') Or (PropName = 'TrackSize') Or
+                (PropName = 'MinTrack') Or (PropName = 'ArcApproximation') Or
+                (PropName = 'NeckWidthThreshold') Or
+                (PropName = 'IslandAreaThreshold') Or
+                (PropName = 'PolyHatchStyle') Or (PropName = 'PourOver') Or
+                (PropName = 'UseOctagons') Then
+        Begin
+            If Oid <> ePolyObject Then Matched := False
+            Else If Not PCBSetPoly(Obj, PropName, Value) Then Refused := True;
+        End
+        Else If ExtraPCBPropertyOwner(PropName) > 0 Then
+        Begin
+            PosVal := PCBSetExtra(Obj, PropName, Value);
+            If PosVal = 0 Then Matched := False
+            Else If PosVal < 0 Then Refused := True;
         End
         Else Matched := False;
 
@@ -871,7 +2181,7 @@ End;
 
 Function MatchesFilterPCB(Obj : IPCB_Primitive; FilterStr : String) : Boolean;
 Var
-    Remaining, Condition, PropName, Expected, Actual : String;
+    Remaining, Condition, PropName, Expected, Actual, Op : String;
     PipePos, EqPos : Integer;
 Begin
     Result := True;
@@ -889,16 +2199,145 @@ Begin
         { A condition that is not Name=Value matches nothing (see
           FilterProblem): skipped, it matched every object. }
         If Trim(Condition) = '' Then Continue;
-        EqPos := Pos('=', Condition);
-        If EqPos < 2 Then Begin Result := False; Exit; End;
+        EqPos := FilterOpPos(Condition);
+        Op := FilterOpText(Condition);
+        If (EqPos < 2) Or (Op = '') Then Begin Result := False; Exit; End;
         PropName := Copy(Condition, 1, EqPos - 1);
-        Expected := Copy(Condition, EqPos + 1, Length(Condition));
+        Expected := Copy(Condition, EqPos + Length(Op), Length(Condition));
+        { Layer.In=A;B (Layer1.In, Layer2.In): the set of layers a       }
+        { Layer~pattern stood for, put there by CanonicalLayerFilter.    }
+        If (PropName = 'Layer.In') Or (PropName = 'Layer1.In')
+            Or (PropName = 'Layer2.In') Then
+        Begin
+            Actual := GetPCBProperty(Obj, Copy(PropName, 1, Length(PropName) - 3));
+            If FilterOpHolds(Op, Actual, Expected,
+                    Pos(';' + Actual + ';', ';' + Expected + ';') > 0) Then Continue;
+            Result := False;
+            Exit;
+        End;
         Actual := GetPCBProperty(Obj, PropName);
-        If Not FilterValueMatchesPCB(PropName, Actual, Expected) Then
+        If Not FilterOpHolds(Op, Actual, Expected,
+                FilterValueMatchesPCB(PropName, Actual, Expected)) Then
         Begin
             Result := False;
             Exit;
         End;
+    End;
+End;
+
+{ A LAYER IN A FILTER MEANS A LAYER, WHATEVER IT IS CALLED (issue #211).      }
+{                                                                            }
+{ The Layer getter answers the internal name (TopLayer, MidLayer3,           }
+{ Mechanical21) and a filter used to compare that text with the value given, }
+{ exactly and case-sensitively. A user's layer name (FluidGon, L2 (GND),     }
+{ Top Layer) or a case variant then matched nothing and the call reported    }
+{ success, Layer!=<user name> matched every object, the objects on that      }
+{ layer included, so a delete written to spare one layer removed it too,     }
+{ and Layer~Fluid* never met a user name. A set= value is resolved by        }
+{ ResolveLayerId; the filter now is too, once per call: a Layer, Layer1 or   }
+{ Layer2 condition with = or != gets the internal name of the layer its      }
+{ value resolves to, and one with ~ or !~ becomes Layer.In= / Layer.In!= the }
+{ layers whose internal OR user name the pattern matches. A value that names }
+{ no layer is handed back in Bad and the condition left as it was. An        }
+{ internal name resolves to itself, so a second pass changes nothing, and    }
+{ NarrowPCBWalk then narrows a user name's walk as it does an internal one.  }
+
+{ Name;Name; of every layer whose internal or user name matches Pattern:   }
+{ the legacy ids 1..80, then Mechanical17..1024.                          }
+Function LayersMatchingPattern(Board : IPCB_Board; Pattern : String) : String;
+Var
+    Stack : IPCB_LayerStack_V7;
+    Obj : IPCB_LayerObject_V7;
+    I : Integer;
+    L : TLayer;
+    Internal, User : String;
+Begin
+    Result := '';
+    Stack := Nil;
+    Try Stack := Board.LayerStack_V7; Except Stack := Nil; End;
+    For I := 1 To 1104 Do
+    Begin
+        If I <= 80 Then
+        Begin
+            L := I;
+            Internal := LayerDisplayName(L);
+            If Internal = 'Unknown' Then Continue;
+        End
+        Else
+        Begin
+            If I - 80 <= 16 Then Continue;
+            L := MechLayerFromNumber(I - 80);
+            If L = eNoLayer Then Break;
+            Internal := 'Mechanical' + IntToStr(I - 80);
+        End;
+        User := '';
+        If Stack <> Nil Then
+        Begin
+            Obj := Nil;
+            Try Obj := Stack.LayerObject_V7[L]; Except Obj := Nil; End;
+            If Obj <> Nil Then
+                Try User := Obj.Name; Except User := ''; End;
+        End;
+        If FilterWildMatch(Internal, Pattern)
+            Or ((User <> '') And FilterWildMatch(User, Pattern)) Then
+            Result := Result + Internal + ';';
+    End;
+End;
+
+Function CanonicalLayerFilter(Board : IPCB_Board; FilterStr : String;
+    Var Bad : String) : String;
+Var
+    Remaining, Condition, PropName, Value, Op : String;
+    PipePos, EqPos : Integer;
+    L : TLayer;
+Begin
+    Result := '';
+    Bad := '';
+    Remaining := FilterStr;
+    While Remaining <> '' Do
+    Begin
+        PipePos := Pos('|', Remaining);
+        If PipePos > 0 Then
+        Begin
+            Condition := Copy(Remaining, 1, PipePos - 1);
+            Remaining := Copy(Remaining, PipePos + 1, Length(Remaining));
+        End
+        Else Begin Condition := Remaining; Remaining := ''; End;
+        EqPos := FilterOpPos(Condition);
+        Op := FilterOpText(Condition);
+        If (EqPos > 1) And (Op <> '') Then
+        Begin
+            PropName := Copy(Condition, 1, EqPos - 1);
+            Value := Copy(Condition, EqPos + Length(Op), Length(Condition));
+            If ((PropName = 'Layer') Or (PropName = 'Layer1') Or (PropName = 'Layer2'))
+                And (Trim(Value) <> '') Then
+            Begin
+                If (Op = '=') Or (Op = '!=') Then
+                Begin
+                    L := eNoLayer;
+                    Try L := ResolveLayerId(Board, Value); Except L := eNoLayer; End;
+                    If L = eNoLayer Then
+                    Begin
+                        If Bad = '' Then Bad := Value;
+                    End
+                    Else
+                        Condition := PropName + Op + LayerDisplayName(L);
+                End
+                Else If (Op = '~') Or (Op = '!~') Then
+                Begin
+                    { A pattern that names one layer becomes that layer, so }
+                    { the walk is narrowed to it as an exact name is.       }
+                    Value := LayersMatchingPattern(Board, Value);
+                    If Op = '~' Then Op := '=' Else Op := '!=';
+                    If (Value <> '') And (Pos(';', Value) = Length(Value)) Then
+                        Condition := PropName + Op + Copy(Value, 1, Length(Value) - 1)
+                    Else
+                        Condition := PropName + '.In' + Op + Value;
+                End;
+            End;
+        End;
+        If Result <> '' Then Result := Result + '|';
+        Result := Result + Condition;
     End;
 End;
 
@@ -925,6 +2364,8 @@ Begin
     Result :=
         (PropName = 'ObjectId') Or (PropName = 'X') Or (PropName = 'Y') Or
         (PropName = 'Layer') Or (PropName = 'Descriptor') Or
+        (PropName = 'DetailString') Or (PropName = 'DRCError') Or
+        (PropName = 'UniqueID') Or (PropName = 'IsElectricalPrim') Or
         (PropName = 'Selected') Or (PropName = 'Net') Or
         (PropName = 'Net.Name') Or (PropName = 'X1') Or (PropName = 'Y1') Or
         (PropName = 'X2') Or (PropName = 'Y2') Or (PropName = 'Width') Or
@@ -938,6 +2379,9 @@ Begin
         (PropName = 'Designator') Or (PropName = 'Designator.Text') Or
         (PropName = 'Comment') Or (PropName = 'Comment.Text') Or
         (PropName = 'SourceDesignator') Or
+        (PropName = 'SourceUniqueId') Or (PropName = 'SourceHierarchicalPath') Or
+        (PropName = 'SourceLibReference') Or (PropName = 'SourceFootprintLibrary') Or
+        (PropName = 'SourceComponentLibrary') Or
         (PropName = 'Kind') Or (PropName = 'RegionKind') Or
         (PropName = 'RemoveDead') Or (PropName = 'RemoveNarrowNecks') Or
         (PropName = 'RemoveIslandsByArea') Or
@@ -945,13 +2389,41 @@ Begin
         (PropName = 'BodyOpacity3D') Or
         (PropName = 'InComponent') Or (PropName = 'Component') Or
         (PropName = 'InPolygon') Or (PropName = 'IsKeepout') Or
+        (PropName = 'IsKeepoutForCopper') Or (PropName = 'IsKeepoutForTrack') Or
+        (PropName = 'IsKeepoutForVia') Or (PropName = 'IsKeepoutForSMDPad') Or
+        (PropName = 'IsKeepoutForTHPad') Or
         (PropName = 'TearDrop') Or
         (PropName = 'Locked') Or (PropName = 'Layer1') Or
         (PropName = 'Layer2') Or (PropName = 'IsRedundant') Or
         (PropName = 'Mode') Or (PropName = 'Height') Or
         (PropName = 'StrokeWidth') Or (PropName = 'IsDesignator') Or
         (PropName = 'IsComment') Or (PropName = 'UseTTFonts') Or
-        (PropName = 'MirrorFlag');
+        (PropName = 'MirrorFlag') Or
+        (PropName = 'BotXSize') Or (PropName = 'BotYSize') Or
+        (PropName = 'TopShapeName') Or
+        (PropName = 'Plated') Or (PropName = 'HoleType') Or
+        (PropName = 'HoleWidth') Or (PropName = 'HoleRotation') Or
+        (PropName = 'SizeTop') Or (PropName = 'SizeMid') Or
+        (PropName = 'SizeBottom') Or
+        (PropName = 'SolderMaskExpansion') Or
+        (PropName = 'SolderMaskBottomExpansion') Or
+        (PropName = 'SolderMaskSeparate') Or (PropName = 'SolderMaskManual') Or
+        (PropName = 'SolderMaskFromHoleEdge') Or
+        (PropName = 'IsTenting_Top') Or (PropName = 'IsTenting_Bottom') Or
+        (PropName = 'IsTestpoint_Top') Or (PropName = 'IsTestpoint_Bottom') Or
+        (PropName = 'IsAssyTestpoint_Top') Or
+        (PropName = 'IsAssyTestpoint_Bottom') Or
+        (PropName = 'BoundsLeft') Or (PropName = 'BoundsBottom') Or
+        (PropName = 'BoundsRight') Or (PropName = 'BoundsTop') Or
+        (PropName = 'UnionIndex') Or (PropName = 'Identifier') Or
+        (PropName = 'Grid') Or (PropName = 'TrackSize') Or
+        (PropName = 'MinTrack') Or (PropName = 'ArcApproximation') Or
+        (PropName = 'NeckWidthThreshold') Or
+        (PropName = 'IslandAreaThreshold') Or
+        (PropName = 'PolyHatchStyle') Or (PropName = 'PourOver') Or
+        (PropName = 'UseOctagons') Or (PropName = 'PourIndex') Or
+        (PropName = 'Poured') Or
+        (ExtraPCBPropertyOwner(PropName) > 0);
 End;
 
 Function UnknownPCBProperties(PropsStr : String) : String;
@@ -990,17 +2462,55 @@ End;
   Reported by a user as too many functions listed to find the right one. }
 Function KnownPCBPropertyList(Dummy : Integer) : String;
 Begin
-    Result := 'ObjectId, X, Y, Layer, Descriptor, Selected, Net, X1, Y1, '
+    Result := 'ObjectId, X, Y, Layer, Descriptor, DetailString, DRCError, '
+        + 'UniqueID, IsElectricalPrim, Selected, Net, X1, Y1, '
         + 'X2, Y2, Width, Radius, StartAngle, EndAngle, XCenter, YCenter, '
         + 'HoleSize, Size, TopShape, TopXSize, TopYSize, Rotation, Name, '
         + 'Text, Pattern, Designator, Comment, SourceDesignator, '
+        + 'SourceUniqueId, SourceHierarchicalPath, SourceLibReference, '
+        + 'SourceFootprintLibrary, SourceComponentLibrary, '
         { Everything the reader above answers. A list that lags the reader
           tells a caller a property does not exist when it does, which is
           how the pour flags were reported as unreachable. }
         + 'Kind, RemoveDead, RemoveNarrowNecks, RemoveIslandsByArea, '
         + 'StandoffHeight, OverallHeight, BodyOpacity3D, InComponent, Component, '
-        + 'InPolygon, IsKeepout, TearDrop, Locked, Layer1, Layer2, IsRedundant, Mode, '
-        + 'Height, StrokeWidth, IsDesignator, IsComment, UseTTFonts, MirrorFlag';
+        + 'InPolygon, IsKeepout, IsKeepoutForCopper, IsKeepoutForTrack, '
+        + 'IsKeepoutForVia, IsKeepoutForSMDPad, IsKeepoutForTHPad, '
+        + 'TearDrop, Locked, Layer1, Layer2, IsRedundant, Mode, '
+        + 'Height, StrokeWidth, IsDesignator, IsComment, UseTTFonts, MirrorFlag'
+        + ', TopShapeName, BotXSize, BotYSize, Plated, HoleType, HoleWidth, '
+        + 'HoleRotation, '
+        + 'SizeTop, SizeMid, SizeBottom, SolderMaskExpansion, '
+        + 'SolderMaskBottomExpansion, SolderMaskSeparate, SolderMaskManual, '
+        + 'SolderMaskFromHoleEdge, IsTenting_Top, IsTenting_Bottom, '
+        + 'IsTestpoint_Top, IsTestpoint_Bottom, IsAssyTestpoint_Top, '
+        + 'IsAssyTestpoint_Bottom, BoundsLeft, BoundsBottom, BoundsRight, '
+        + 'BoundsTop, UnionIndex, Identifier, Grid, TrackSize, MinTrack, '
+        + 'ArcApproximation, NeckWidthThreshold, IslandAreaThreshold, '
+        + 'PolyHatchStyle, PourOver, UseOctagons, PourIndex, Poured, '
+        + 'HolePositiveTolerance, HoleNegativeTolerance, IsCounterHole, '
+        + 'BarCodeKind, BarCodeRenderMode, BarCodeFullWidth, BarCodeFullHeight, '
+        + 'BarCodeXMargin, BarCodeYMargin, BarCodeMinWidth, BarCodeInverted, '
+        + 'BarCodeShowText, BarCodeFontName, Multiline, MultilineTextWidth, '
+        + 'MultilineTextHeight, MultilineTextAutoPosition, TextHeight, TextWidth, '
+        + 'TextLineWidth, TextGap, TextPosition, TextDimensionUnit, TextPrecision, '
+        + 'TextFormat, TextPrefix, TextSuffix, ArrowSize, ArrowLineWidth, '
+        + 'ArrowLength, ArrowPosition, ExtensionOffset, ExtensionLineWidth, '
+        + 'ExtensionPickGap, PolygonType, BorderWidth, AvoidObsticles, '
+        + 'ClipAcuteCorners, MitreCorners, IgnoreViolations, ArcPourMode, '
+        + 'EnablePinSwapping, EnablePartSwapping, IsBGA, LockStrings, PrimitiveLock, '
+        + 'NameAutoPosition, CommentAutoPosition, FootprintDescription, '
+        + 'DefaultPCB3DModel, PackageSpecificHash, JumperID, SwapID_Pad, SwapID_Part, '
+        + 'Inverted, UseInvertedRectangle, InvertedTTTextBorder, '
+        + 'TTFInvertedTextJustify, TTFOffsetFromInvertedRect, ConvertedString, UnderlyingString, FontName, '
+        + 'TextKind, FontID, Bold, Italic, InvRectWidth, InvRectHeight, '
+        + 'DrawRemovedNecks, DrawRemovedIslands, DrawDeadCopper, ExpandOutline, '
+        + 'AutoGenerateName, SourceDescription, JumpersVisible, ChannelOffset, '
+        + 'GroupNum, SwappedPadName, OwnerPart_ID, OverrideColor, Texture, '
+        + 'TextureRotation, IsPreRoute, UserRouted, PasteMaskExpansionMode, '
+        + 'SolderMaskExpansionMode, PasteMaskUsePercent, PasteMaskPercent, '
+        + 'PasteMaskEnabled, DrillType, IsVirtualPin, FlippedOnLayer, '
+        + 'BorderSpaceType';
 End;
 
 Function BuildObjectJsonPCB(Obj : IPCB_Primitive; PropsStr : String) : String;
@@ -1043,6 +2553,15 @@ Begin
         PropName := Copy(Assignment, 1, EqPos - 1);
         PropValue := Copy(Assignment, EqPos + 1, Length(Assignment));
         SetPCBProperty(Obj, PropName, PropValue);
+        { A lone SolderMaskExpansion is for both sides (issue #61): it is  }
+        { the top value once the sides are separate, so on such a via or   }
+        { pad the old bottom would stay behind. As set_pad_properties does, }
+        { the bottom follows unless the same set string gives it a value.  }
+        If (PropName = 'SolderMaskExpansion') And IsFloatStr(PropValue)
+            And (Pos('SolderMaskBottomExpansion=', SetStr) = 0) Then
+        Begin
+            Try PCBSetMask(Obj, 'SolderMaskBottomExpansion', PropValue); Except End;
+        End;
     End;
 End;
 
@@ -1050,18 +2569,393 @@ End;
 { PCB Board iteration, query/modify/delete on active PCB                    }
 {..............................................................................}
 
-Function ProcessPCBBoardObjects(Board : IPCB_Board; ObjTypeInt : Integer;
-    FilterStr : String; PropsStr : String; SetStr : String;
-    Mode : String; Var TotalMatched : Integer; Limit : Integer) : String;
+{ WHICH PART OF THE BOARD THE WALK BELOW NEEDS TO SEE. Every query, modify }
+{ and delete walked every object of its type on every layer and asked the  }
+{ filter of each one, so a filter naming one layer cost the same as none:  }
+{ MEASURED, a track delete matching nothing took 5.3 s on a board of 8719  }
+{ tracks, almost all of them footprints' and on other layers. An exact    }
+{ Layer=<name> now narrows the iterator to that layer, but only when the   }
+{ name is the one the getter answers for it (LayerDisplayName), so the     }
+{ filter would match nothing outside it anyway. InComponent=false is NOT   }
+{ narrowed: eProcessFree also leaves out the copper a polygon pour owns    }
+{ (MEASURED: 654 of 794 free regions handed out, none of a pour's).        }
+{ MatchesFilterPCB still checks every object the narrowed walk hands out,  }
+{ so a narrowing can only drop what the filter would reject. Anything else }
+{ (another operator, a name that does not resolve) walks as before.        }
+{ A Layer.In=A;B (a Layer~pattern, CanonicalLayerFilter) narrows to the    }
+{ set of those layers, so a pattern meeting a few layers walks only them. }
+Procedure NarrowPCBWalk(Board : IPCB_Board; Iter : IPCB_BoardIterator;
+    FilterStr : String);
+Var
+    Remaining, Condition, PropName, Expected, Name : String;
+    PipePos, EqPos, SemiPos, InSet : Integer;
+    OnLayer, Got : TLayer;
+    OneLayer, Several : IPCB_LayerSet;
+    HaveSet : Boolean;
+Begin
+    OnLayer := eNoLayer;
+    HaveSet := False;
+    InSet := 0;
+    Remaining := FilterStr;
+    While Remaining <> '' Do
+    Begin
+        PipePos := Pos('|', Remaining);
+        If PipePos > 0 Then
+        Begin
+            Condition := Copy(Remaining, 1, PipePos - 1);
+            Remaining := Copy(Remaining, PipePos + 1, Length(Remaining));
+        End
+        Else Begin Condition := Remaining; Remaining := ''; End;
+        EqPos := FilterOpPos(Condition);
+        If (EqPos > 1) And (FilterOpText(Condition) = '=') Then
+        Begin
+            PropName := Copy(Condition, 1, EqPos - 1);
+            Expected := Copy(Condition, EqPos + 1, Length(Condition));
+            If (PropName = 'Layer') And (OnLayer = eNoLayer) Then
+            Begin
+                Got := eNoLayer;
+                Try Got := ResolveLayerId(Board, Expected); Except Got := eNoLayer; End;
+                If (Got <> eNoLayer) And (LayerDisplayName(Got) = Expected) Then
+                    OnLayer := Got;
+            End
+            Else If (PropName = 'Layer.In') And (Not HaveSet) And (Expected <> '') Then
+            Begin
+                HaveSet := True;
+                Several := LayerSet.CreateLayerSet;
+                While Expected <> '' Do
+                Begin
+                    SemiPos := Pos(';', Expected);
+                    If SemiPos = 0 Then SemiPos := Length(Expected) + 1;
+                    Name := Copy(Expected, 1, SemiPos - 1);
+                    Expected := Copy(Expected, SemiPos + 1, Length(Expected));
+                    Got := eNoLayer;
+                    Try Got := ResolveLayerId(Board, Name); Except Got := eNoLayer; End;
+                    If (Got <> eNoLayer) And (LayerDisplayName(Got) = Name) Then
+                    Begin
+                        Several.Include(Got);
+                        Inc(InSet);
+                    End
+                    Else
+                    Begin
+                        { A name that does not round-trip: walk everything. }
+                        InSet := 0;
+                        Break;
+                    End;
+                End;
+            End;
+        End;
+    End;
+    { The legacy set stops at Mechanical16: a layer past it gets a V7 set  }
+    { of its own, as the layout model's copper read does (issue #155).     }
+    If (OnLayer = eNoLayer) And (InSet > 0) Then
+        Iter.AddFilter_IPCB_LayerSet(Several)
+    Else If OnLayer = eNoLayer Then
+        Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers)
+    Else If GetLayerString(OnLayer) = 'Unknown' Then
+    Begin
+        OneLayer := LayerSet.CreateLayerSet;
+        OneLayer.Include(OnLayer);
+        Iter.AddFilter_IPCB_LayerSet(OneLayer);
+    End
+    Else
+        Iter.AddFilter_LayerSet(MkSet(OnLayer));
+    Iter.AddFilter_Method(eProcessAll);
+End;
+
+{ The value of the first exact Prop=Value condition in a filter. }
+Function FilterExactValue(FilterStr : String; Prop : String; Var Value : String) : Boolean;
+Var
+    Remaining, Condition : String;
+    PipePos, EqPos : Integer;
+Begin
+    Result := False;
+    Value := '';
+    Remaining := FilterStr;
+    While Remaining <> '' Do
+    Begin
+        PipePos := Pos('|', Remaining);
+        If PipePos > 0 Then
+        Begin
+            Condition := Copy(Remaining, 1, PipePos - 1);
+            Remaining := Copy(Remaining, PipePos + 1, Length(Remaining));
+        End
+        Else Begin Condition := Remaining; Remaining := ''; End;
+        EqPos := FilterOpPos(Condition);
+        If (EqPos > 1) And (FilterOpText(Condition) = '=') Then
+            If Copy(Condition, 1, EqPos - 1) = Prop Then
+            Begin
+                Value := Copy(Condition, EqPos + 1, Length(Condition));
+                Result := True;
+                Exit;
+            End;
+    End;
+End;
+
+{ Whether the walk is still collecting: a limit of 0 takes everything. }
+Function PCBStillCollecting(Matches : TInterfaceList; Limit : Integer) : Boolean;
+Begin
+    Result := (Limit <= 0) Or (Matches.Count < Limit);
+End;
+
+{ One object into the matches, once: the net route meets a poured track both }
+{ in its net and in its pour. Seen is sorted, so the check is a binary search. }
+Procedure PCBKeepMatch(Obj : IPCB_Primitive; FilterStr : String;
+    Matches : TInterfaceList; Seen : TStringList);
+Var
+    Key : String;
+Begin
+    If Not MatchesFilterPCB(Obj, FilterStr) Then Exit;
+    Key := IntToStr(Obj.I_ObjectAddress);
+    If Seen.IndexOf(Key) >= 0 Then Exit;
+    Seen.Add(Key);
+    Matches.Add(Obj);
+End;
+
+{ WHERE A MATCH CAN BE, BEFORE ASKING THE FILTER. The walk went through every }
+{ object of the type on the board and asked the filter of each one. Some      }
+{ filters name a place that holds every possible match, and walking only that }
+{ place hands the filter far fewer objects:                                   }
+{   Net=<name>        the net's own primitives, and the copper of every pour  }
+{                     on that net (poured copper is not in the net's group,   }
+{                     and the Net getter answers the pour's net for it);      }
+{   Component=<name>  the primitives of every component of that designator;   }
+{   BoundsLeft / BoundsRight / X1 / X2 and BoundsBottom / BoundsTop / Y1 / Y2 }
+{                     a point on every match's bounding box, so a spatial     }
+{                     search of a small area round it (primitives only: a     }
+{                     spatial iterator does not hand out group objects). The  }
+{                     index does not always hold an object by the box its     }
+{                     getters print, so a search that hands out no match      }
+{                     goes on to the walk;                                    }
+{ else the board walk, narrowed by Layer= (NarrowPCBWalk). MatchesFilterPCB   }
+{ still decides every object any route hands out.                             }
+{ Every route sees layers by their internal names: a user name in a Layer   }
+{ condition is resolved once here, not per object (CanonicalLayerFilter). A }
+{ value that names no layer stays as given; ProcessActivePCBDoc refuses     }
+{ such a filter before it gets here.                                        }
+Procedure CollectPCBMatches(Board : IPCB_Board; ObjTypeInt : Integer;
+    FilterStr : String; Limit : Integer; Matches : TInterfaceList);
 Var
     Iterator : IPCB_BoardIterator;
+    Spatial : IPCB_SpatialIterator;
+    Group : IPCB_GroupIterator;
+    Obj : IPCB_Primitive;
+    Owner : IPCB_Polygon;
+    Net : IPCB_Net;
+    Comp : IPCB_Component;
+    Seen : TStringList;
+    Wanted, Value, BadLayer : String;
+    HasX, HasY, IsPrimitive : Boolean;
+    X, Y, Lo, Hi, Margin : TCoord;
+    Found : Integer;
+Begin
+    FilterStr := CanonicalLayerFilter(Board, FilterStr, BadLayer);
+    Seen := TStringList.Create;
+    Try
+        Seen.Sorted := True;
+        IsPrimitive := (ObjTypeInt = eTrackObject) Or (ObjTypeInt = eArcObject)
+            Or (ObjTypeInt = eViaObject) Or (ObjTypeInt = ePadObject)
+            Or (ObjTypeInt = eFillObject) Or (ObjTypeInt = eRegionObject)
+            Or (ObjTypeInt = eTextObject);
+
+        If (FilterExactValue(FilterStr, 'Net', Wanted) Or FilterExactValue(FilterStr, 'Net.Name', Wanted))
+            And (Wanted <> '') And IsPrimitive And (ObjTypeInt <> eTextObject) Then
+        Begin
+            Iterator := Board.BoardIterator_Create;
+            Try
+                Iterator.AddFilter_ObjectSet(MkSet(eNetObject));
+                Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+                Iterator.AddFilter_Method(eProcessAll);
+                Net := Iterator.FirstPCBObject;
+                While (Net <> Nil) And PCBStillCollecting(Matches, Limit) Do
+                Begin
+                    If Net.Name = Wanted Then
+                    Begin
+                        Group := Net.GroupIterator_Create;
+                        Try
+                            Group.AddFilter_ObjectSet(MkSet(ObjTypeInt));
+                            Group.AddFilter_AllLayers;
+                            Obj := Group.FirstPCBObject;
+                            While (Obj <> Nil) And PCBStillCollecting(Matches, Limit) Do
+                            Begin
+                                PCBKeepMatch(Obj, FilterStr, Matches, Seen);
+                                Obj := Group.NextPCBObject;
+                            End;
+                        Finally
+                            Net.GroupIterator_Destroy(Group);
+                        End;
+                    End;
+                    Net := Iterator.NextPCBObject;
+                End;
+            Finally
+                Board.BoardIterator_Destroy(Iterator);
+            End;
+            Iterator := Board.BoardIterator_Create;
+            Try
+                Iterator.AddFilter_ObjectSet(MkSet(ePolyObject));
+                Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+                Iterator.AddFilter_Method(eProcessAll);
+                Owner := Iterator.FirstPCBObject;
+                While (Owner <> Nil) And PCBStillCollecting(Matches, Limit) Do
+                Begin
+                    Value := '';
+                    Net := Owner.Net;
+                    If Net <> Nil Then Value := Net.Name;
+                    If Value = Wanted Then
+                    Begin
+                        Group := Owner.GroupIterator_Create;
+                        Try
+                            Group.AddFilter_ObjectSet(MkSet(ObjTypeInt));
+                            Obj := Group.FirstPCBObject;
+                            While (Obj <> Nil) And PCBStillCollecting(Matches, Limit) Do
+                            Begin
+                                PCBKeepMatch(Obj, FilterStr, Matches, Seen);
+                                Obj := Group.NextPCBObject;
+                            End;
+                        Finally
+                            Owner.GroupIterator_Destroy(Group);
+                        End;
+                    End;
+                    Owner := Iterator.NextPCBObject;
+                End;
+            Finally
+                Board.BoardIterator_Destroy(Iterator);
+            End;
+            Exit;
+        End;
+
+        { Not for texts: a component's designator and comment are not in   }
+        { its group, while the Component getter names their component      }
+        { (MEASURED: U4 3 texts, its group 1).                               }
+        If FilterExactValue(FilterStr, 'Component', Wanted) And (Wanted <> '')
+            And (ObjTypeInt <> eComponentObject) And (ObjTypeInt <> eTextObject) Then
+        Begin
+            Iterator := Board.BoardIterator_Create;
+            Try
+                Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+                Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+                Iterator.AddFilter_Method(eProcessAll);
+                Comp := Iterator.FirstPCBObject;
+                While (Comp <> Nil) And PCBStillCollecting(Matches, Limit) Do
+                Begin
+                    If Comp.Name.Text = Wanted Then
+                    Begin
+                        Group := Comp.GroupIterator_Create;
+                        Try
+                            Group.AddFilter_ObjectSet(MkSet(ObjTypeInt));
+                            Obj := Group.FirstPCBObject;
+                            While (Obj <> Nil) And PCBStillCollecting(Matches, Limit) Do
+                            Begin
+                                PCBKeepMatch(Obj, FilterStr, Matches, Seen);
+                                Obj := Group.NextPCBObject;
+                            End;
+                        Finally
+                            Comp.GroupIterator_Destroy(Group);
+                        End;
+                    End;
+                    Comp := Iterator.NextPCBObject;
+                End;
+            Finally
+                Board.BoardIterator_Destroy(Iterator);
+            End;
+            Exit;
+        End;
+
+        HasX := False; HasY := False; X := 0; Y := 0;
+        If IsPrimitive Then
+        Begin
+            If FilterExactValue(FilterStr, 'BoundsLeft', Value) Or FilterExactValue(FilterStr, 'BoundsRight', Value)
+                Or FilterExactValue(FilterStr, 'X1', Value) Or FilterExactValue(FilterStr, 'X2', Value) Then
+            Begin
+                HasX := True;
+                X := MilsToCoordF(StrToFloatDef(Value, 0));
+            End;
+            If FilterExactValue(FilterStr, 'BoundsBottom', Value) Or FilterExactValue(FilterStr, 'BoundsTop', Value)
+                Or FilterExactValue(FilterStr, 'Y1', Value) Or FilterExactValue(FilterStr, 'Y2', Value) Then
+            Begin
+                HasY := True;
+                Y := MilsToCoordF(StrToFloatDef(Value, 0));
+            End;
+        End;
+        If HasX Or HasY Then
+        Begin
+            { One mil round the point: the filter compares printed values.   }
+            { A via or pad is searched 100 mil round it. MEASURED on AD 26.11 }
+            { on a board just opened: every via whose mask comes from the     }
+            { rules is indexed by a box 16 mil per side narrower than the     }
+            { Bounds the getters print, and a search by those Bounds found    }
+            { none of its 279 vias.                                           }
+            Margin := MilsToCoordF(1);
+            If (ObjTypeInt = eViaObject) Or (ObjTypeInt = ePadObject) Then
+                Margin := MilsToCoordF(100);
+            Lo := MilsToCoordF(-200000);
+            Hi := MilsToCoordF(200000);
+            Found := Matches.Count;
+            { Every layer: a spatial search narrowed to TopLayer left out    }
+            { the SMD pads on it (MEASURED); the filter checks Layer anyway. }
+            Spatial := Board.SpatialIterator_Create;
+            Try
+                Spatial.AddFilter_ObjectSet(MkSet(ObjTypeInt));
+                Spatial.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+                If HasX And HasY Then
+                    Spatial.AddFilter_Area(X - Margin, Y - Margin, X + Margin, Y + Margin)
+                Else If HasX Then
+                    Spatial.AddFilter_Area(X - Margin, Lo, X + Margin, Hi)
+                Else
+                    Spatial.AddFilter_Area(Lo, Y - Margin, Hi, Y + Margin);
+                Obj := Spatial.FirstPCBObject;
+                While (Obj <> Nil) And PCBStillCollecting(Matches, Limit) Do
+                Begin
+                    PCBKeepMatch(Obj, FilterStr, Matches, Seen);
+                    Obj := Spatial.NextPCBObject;
+                End;
+            Finally
+                Board.SpatialIterator_Destroy(Spatial);
+            End;
+            { For a via or pad the index is a shortcut, not the last word:    }
+            { when it hands out no match, the board walk below decides, so    }
+            { one the index holds by some other box is still found. Every     }
+            { other primitive is indexed by exactly the box its getters print }
+            { (audit.find_stale_read_paths, MEASURED on a board just opened), }
+            { and obj_modify keeps it so; walking for them on every miss cost }
+            { 10 s on a 1817-track board.                                     }
+            If Matches.Count > Found Then Exit;
+            If (ObjTypeInt <> eViaObject) And (ObjTypeInt <> ePadObject) Then Exit;
+        End;
+
+        Iterator := Board.BoardIterator_Create;
+        Try
+            Iterator.AddFilter_ObjectSet(MkSet(ObjTypeInt));
+            NarrowPCBWalk(Board, Iterator, FilterStr);
+            Obj := Iterator.FirstPCBObject;
+            While (Obj <> Nil) And PCBStillCollecting(Matches, Limit) Do
+            Begin
+                If MatchesFilterPCB(Obj, FilterStr) Then Matches.Add(Obj);
+                Obj := Iterator.NextPCBObject;
+            End;
+        Finally
+            Board.BoardIterator_Destroy(Iterator);
+        End;
+    Finally
+        Seen.Free;
+    End;
+End;
+
+Function ProcessPCBBoardObjects(Board : IPCB_Board; ObjTypeInt : Integer;
+    FilterStr : String; PropsStr : String; SetStr : String;
+    Mode : String; Var TotalMatched : Integer; Limit : Integer;
+    Var IndexJson : String) : String;
+Var
     Obj, FoundObj : IPCB_Primitive;
     ObjJson : String;
-    First : Boolean;
-    I : Integer;
+    First, Removed : Boolean;
+    I, Remaining, Held, Reindexed, LeftStale, IndexBefore : Integer;
     Victims : TInterfaceList;
+    FilterWas : Boolean;
 Begin
     Result := '';
+    IndexJson := '';
+    Reindexed := 0;
+    LeftStale := 0;
     First := (TotalMatched = 0);
 
     { EVERY PreProcess BELOW IS IN A Try/Finally, and that is not tidiness.   }
@@ -1094,33 +2988,32 @@ Begin
     If Mode = 'delete' Then
     Begin
         Victims := TInterfaceList.Create;
-        Iterator := Board.BoardIterator_Create;
-        Try
-            Iterator.AddFilter_ObjectSet(MkSet(ObjTypeInt));
-            Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-            Iterator.AddFilter_Method(eProcessAll);
-            Obj := Iterator.FirstPCBObject;
-            While Obj <> Nil Do
-            Begin
-                If MatchesFilterPCB(Obj, FilterStr) Then Victims.Add(Obj);
-                Obj := Iterator.NextPCBObject;
-            End;
-        Finally
-            Board.BoardIterator_Destroy(Iterator);
-        End;
-        PCBServer.PreProcess;
+        CollectPCBMatches(Board, ObjTypeInt, FilterStr, 0, Victims);
+        PcbBeginEdit(0);
         Try
             For I := 0 To Victims.Count - 1 Do
             Begin
                 FoundObj := Victims.Items[I];
                 If FoundObj = Nil Then Continue;
-                PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
-                    PCBM_BoardRegisteration, FoundObj.I_ObjectAddress);
-                Board.RemovePCBObject(FoundObj);
+                { A raise here used to end the request as an error with the  }
+                { objects already removed uncounted. Stop, and report both.  }
+                Removed := True;
+                Try
+                    PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                        PCBM_BoardRegisteration, FoundObj.I_ObjectAddress);
+                    Board.RemovePCBObject(FoundObj);
+                Except
+                    Removed := False;
+                End;
+                If Not Removed Then
+                Begin
+                    NoteDeleteFault('removing an object raised an error');
+                    Break;
+                End;
                 Inc(TotalMatched);
             End;
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
         End;
         Exit;
     End;
@@ -1131,22 +3024,11 @@ Begin
     If Mode = 'modify' Then
     Begin
         Victims := TInterfaceList.Create;
-        Iterator := Board.BoardIterator_Create;
-        Try
-            Iterator.AddFilter_ObjectSet(MkSet(ObjTypeInt));
-            Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-            Iterator.AddFilter_Method(eProcessAll);
-            Obj := Iterator.FirstPCBObject;
-            While Obj <> Nil Do
-            Begin
-                If (Limit > 0) And (Victims.Count >= Limit) Then Break;
-                If MatchesFilterPCB(Obj, FilterStr) Then Victims.Add(Obj);
-                Obj := Iterator.NextPCBObject;
-            End;
-        Finally
-            Board.BoardIterator_Destroy(Iterator);
-        End;
-        PCBServer.PreProcess;
+        CollectPCBMatches(Board, ObjTypeInt, FilterStr, Limit, Victims);
+        { A Selected=true in the set string must not be vetoed by the       }
+        { editor's Selection Filter (see PcbSelectFilterOff).               }
+        FilterWas := PcbSelectFilterOff(Board);
+        PcbBeginEdit(0);
         Try
             For I := 0 To Victims.Count - 1 Do
             Begin
@@ -1157,45 +3039,47 @@ Begin
                 { while the board's spatial index still held the old one, so }
                 { the mouse could not pick it and a spatial search found it  }
                 { where it no longer was.                                    }
+                IndexBefore := BoardIndexState(Board, FoundObj);
                 FoundObj.BeginModify;
                 Try
                     ApplySetPropertiesPCB(FoundObj, SetStr);
                 Finally
                     FoundObj.EndModify;
                 End;
+                { A WRITE IS DONE WHEN THE INDEX STILL FINDS THE OBJECT. A   }
+                { via's mask grew its box past its index entry (#208), and   }
+                { the bracket does not re-index every property, so each      }
+                { changed object is looked up again after the write and      }
+                { re-indexed where the index holds it less than before.      }
+                Held := EnsureIndexed(Board, FoundObj, IndexBefore);
+                If Held = 1 Then Inc(Reindexed)
+                Else If Held >= 2 Then Inc(LeftStale);
                 FoundObj.GraphicallyInvalidate;
                 Inc(TotalMatched);
             End;
         Finally
-            PCBServer.PostProcess;
+            PcbEndEdit(0);
+            PcbSelectFilterRestore(Board, FilterWas);
         End;
+        IndexJson := ',"reindexed":' + IntToStr(Reindexed)
+            + ',"stale_index":' + IntToStr(LeftStale);
         Exit;
     End;
 
-    Iterator := Board.BoardIterator_Create;
-    Try
-        Iterator.AddFilter_ObjectSet(MkSet(ObjTypeInt));
-        { The V7 layer set: the legacy AllLayers stops at Mechanical16, and }
-        { MEASURED, 6390 outline primitives on Mechanical17 counted 0.      }
-        Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-        Iterator.AddFilter_Method(eProcessAll);
-
-        Obj := Iterator.FirstPCBObject;
-        While Obj <> Nil Do
-        Begin
-            If (Limit > 0) And (TotalMatched >= Limit) Then Break;
-            If MatchesFilterPCB(Obj, FilterStr) Then
-            Begin
-                ObjJson := BuildObjectJsonPCB(Obj, PropsStr);
-                If Not First Then Result := Result + ',';
-                First := False;
-                Result := Result + ObjJson;
-                Inc(TotalMatched);
-            End;
-            Obj := Iterator.NextPCBObject;
-        End;
-    Finally
-        Board.BoardIterator_Destroy(Iterator);
+    { What is left of the limit: the count carries over from earlier calls. }
+    If (Limit > 0) And (TotalMatched >= Limit) Then Exit;
+    Remaining := 0;
+    If Limit > 0 Then Remaining := Limit - TotalMatched;
+    Victims := TInterfaceList.Create;
+    CollectPCBMatches(Board, ObjTypeInt, FilterStr, Remaining, Victims);
+    For I := 0 To Victims.Count - 1 Do
+    Begin
+        Obj := Victims.Items[I];
+        ObjJson := BuildObjectJsonPCB(Obj, PropsStr);
+        If Not First Then Result := Result + ',';
+        First := False;
+        Result := Result + ObjJson;
+        Inc(TotalMatched);
     End;
 End;
 
@@ -1308,11 +3192,15 @@ End;
 { After the outline is rewritten: Altium's own refresh of the cached size,   }
 { as the community outline scripts do (PolygonReFitBO.pas). Apart from the  }
 { caller, so these two calls are the only new identifiers in one place.      }
+{ The layer stack regions (Board Planning Mode) are separate objects cut   }
+{ from the board shape. Without the rebuild they keep the OLD shape: a     }
+{ board reshaped from a copy of another kept that board's region.         }
 Procedure RefreshBoardOutline(Board : IPCB_Board);
 Begin
     Board.BoardOutline.SetState_XSizeYSize;
     Board.BoardOutline.GraphicallyInvalidate;
     Board.UpdateBoardOutline;
+    Board.RebuildSplitBoardRegions(True);
 End;
 
 { A polygon or board outline holds one segment past PointCount: the closing }
@@ -1354,7 +3242,7 @@ Begin
             Condition := Remaining;
             Remaining := '';
         End;
-        EqPos := Pos('=', Condition);
+        EqPos := FilterOpPos(Condition);
         If EqPos > 1 Then
         Begin
             PropName := Copy(Condition, 1, EqPos - 1);
@@ -1373,7 +3261,7 @@ Function ProcessActivePCBDoc(ObjTypeInt : Integer;
 Var
     Board : IPCB_Board;
     TotalMatched : Integer;
-    JsonItems, Why, BadLayer, BadCond : String;
+    JsonItems, Why, BadLayer, BadCond, Canon, IndexJson : String;
 Begin
     BadCond := FilterProblem(FilterStr);
     If BadCond <> '' Then
@@ -1419,6 +3307,16 @@ Begin
         Exit;
     End;
 
+    { A filter layer that names no layer matched nothing with = and every }
+    { object with != (a delete then removed them all), reported as success. }
+    Canon := CanonicalLayerFilter(Board, FilterStr, BadLayer);
+    If BadLayer <> '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'UNKNOWN_LAYER',
+            'Unknown layer name in the filter: ' + BadLayer + '. Nothing was '
+            + 'matched or changed. ' + BoardLayerNamesHint(Board));
+        Exit;
+    End;
     If SetStr <> '' Then
     Begin
         BadLayer := UnresolvedLayerAssignment(Board, SetStr);
@@ -1431,9 +3329,12 @@ Begin
     End;
     TotalMatched := 0;
     JsonItems := ProcessPCBBoardObjects(Board, ObjTypeInt,
-        FilterStr, PropsStr, SetStr, Mode, TotalMatched, Limit);
+        Canon, PropsStr, SetStr, Mode, TotalMatched, Limit, IndexJson);
 
-    If (Mode = 'modify') Or (Mode = 'delete') Or (Mode = 'create') Then
+    { Nothing matched, nothing changed: no redraw of the whole board and no }
+    { dirty mark on a document the call did not touch.                     }
+    If ((Mode = 'modify') Or (Mode = 'delete') Or (Mode = 'create'))
+        And (TotalMatched > 0) Then
     Begin
         Board.GraphicalView_ZoomRedraw;
         MarkDocDirtyByPath(Board.FileName);
@@ -1447,7 +3348,7 @@ Begin
           whether a property write landed. The tail reports that, the same
           way the schematic modify replies do. }
         Result := BuildSuccessResponse(RequestId,
-            '{"matched":' + IntToStr(TotalMatched)
+            '{"matched":' + IntToStr(TotalMatched) + IndexJson
             + ModifyOutcomeJson(0) + '}');
 End;
 

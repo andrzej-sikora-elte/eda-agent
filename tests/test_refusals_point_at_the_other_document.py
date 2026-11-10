@@ -35,7 +35,13 @@ _MUST_HINT = ("NO_PCBLIB", "NO_SCHLIB", "NO_PCB", "NO_BOARD",
 #: Codes deliberately left without one, with the reason. Listing them
 #: is what makes the set above a decision rather than an oversight.
 _NO_HINT_NEEDED = {
+    "NOT_A_DIELECTRIC": "the layer was found on the right board; the message says "
+                        "which tool lists the dielectric layers",
+    "WRONG_RULE_KIND": "the rule was found on the right board; the message names "
+                       "its kind and the kind the setting is for",
     "NO_DOCUMENT": "nothing is open at all, so there is no sibling",
+    "NOT_A_WIRING_DIAGRAM": "the message names the document found and says a "
+                            ".WirDoc is needed; no other open document is one",
     "NO_LIBRARY": "the message already says to supply library_path",
     "NO_SCH_SERVER": "an infrastructure failure, not a document mix-up",
     "USE_DEDICATED_TOOL": "the message already names the tool to call",
@@ -45,6 +51,8 @@ _NO_HINT_NEEDED = {
     # redirect a hint would have added.
     "NOT_A_PLANE": "a wrong layer kind, not a wrong document, and the "
                    "message already names the tool for the other case",
+    "NOT_A_TEMPLATE": "the sheet is the right document; the template_file "
+                      "argument is not a .SchDot and the message says so",
     "WRONG_DOCUMENT_FOCUSED": "already names asked-for and actual",
     "WRONG_LIBRARY": "already names asked-for and actual",
     "WRONG_DOC_KIND": "already says to pass sheet_path",

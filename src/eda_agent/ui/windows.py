@@ -57,6 +57,7 @@ from typing import Callable, Optional
 from .captions import plain
 
 try:                                            # pragma: no cover - platform
+    import pywintypes
     import win32api
     import win32con
     import win32gui
@@ -81,6 +82,43 @@ def _require():
             "pywin32 is not importable, so no dialog can be inspected or "
             "driven. It is a declared dependency on win32, so this usually "
             "means a non-Windows host or a broken install.")
+    _make_dpi_aware()
+
+
+_DPI_DONE = False
+
+
+def _make_dpi_aware() -> None:
+    """Read and click in physical pixels, once per process.
+
+    A process that does not declare DPI awareness is handed rectangles
+    scaled down by the display scale, while Altium (DPI aware) draws in
+    physical pixels. At 200% every rectangle read was half size and a
+    click aimed by one landed in the wrong place (issue #94). Per-monitor
+    v2 first, then the older per-monitor and system calls for older
+    Windows builds. Called before any window is read, and harmless for
+    a server process that owns no windows.
+    """
+    global _DPI_DONE
+    if _DPI_DONE:
+        return
+    _DPI_DONE = True
+    try:
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 is (HANDLE)-4.
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(
+                ctypes.c_void_p(-4)):
+            return
+    except Exception:                            # pragma: no cover - platform
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except Exception:                            # pragma: no cover - platform
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:                            # pragma: no cover - platform
+        pass
 
 
 #: Class-name fragments that mark a pressable pushbutton.
@@ -134,9 +172,15 @@ def automation_enabled() -> bool:
     on the next restart.
     """
     raw = os.environ.get(UI_AUTOMATION_ENV)
-    if raw is None:
-        return True
-    return raw.strip().lower() not in _OFF
+    if raw is not None and raw.strip().lower() in _OFF:
+        return False
+    return not _panel_off()
+
+
+def _panel_off() -> bool:
+    """Switched off on the Config tab of the Altium panel."""
+    from ..preferences import ui_automation_off
+    return ui_automation_off()
 
 
 def _gate(what: str) -> None:
@@ -148,9 +192,10 @@ def _gate(what: str) -> None:
     """
     if not automation_enabled():
         raise AutomationDisabled(
-            f"refusing {what}: UI automation is disabled by "
-            f"{UI_AUTOMATION_ENV}. Unset it, or set it to 1, to allow "
-            f"synthesised keyboard and mouse input again")
+            f"refusing {what}: UI automation is switched off, by "
+            f"{UI_AUTOMATION_ENV} or on the Config tab of the bridge panel "
+            f"in Altium (Menus, dialogs, keys). The user can turn it back "
+            f"on there, or unset the variable")
 
 
 class ForegroundLost(RuntimeError):
@@ -275,6 +320,51 @@ def show_if_hidden(hwnds) -> list:
     return shown
 
 
+#: ShowWindow's SW_SHOWNA: shown in its current state, maximized stays
+#: maximized, and the user's active window keeps the focus.
+_SW_SHOWNA = 8
+
+
+def reshow_hidden_frames_of(owner_title: str) -> list:
+    """Show the hidden main frame of the process owning a visible window.
+
+    Altium's main window has been found hidden, not minimized and with
+    no taskbar button, while the bridge kept answering: after relaunch
+    hand-offs, after a menu walk, and once with nothing but pings in the
+    trace for hours. The owner window (the bridge's status window) picks
+    the process, so a second Altium is never touched, and a hidden owner
+    means that process is not one to act on.
+
+    ShowWindowAsync, because a synchronous show waits on Altium's UI
+    thread. Returns the handles shown again; [] when nothing was hidden
+    or nothing could be read.
+    """
+    if not _AVAILABLE:
+        return []
+    try:
+        everything = enumerate_windows(visible_only=False)
+        owners = {w.pid for w in everything if w.title == owner_title
+                  and win32gui.IsWindowVisible(w.hwnd)}
+        shown = []
+        for w in everything:
+            if (w.pid in owners and _is_main_frame(w)
+                    and not win32gui.IsWindowVisible(w.hwnd)):
+                _show_without_focus(w.hwnd)
+                shown.append(w.hwnd)
+        return shown
+    except Exception:                            # noqa: BLE001
+        return []
+
+
+def _show_without_focus(hwnd: int) -> None:
+    ctypes.windll.user32.ShowWindowAsync(hwnd, _SW_SHOWNA)
+
+
+def show_without_focus(hwnd: int) -> None:
+    """Show a hidden window without activating it (see above)."""
+    _show_without_focus(hwnd)
+
+
 def owns_foreground(hwnd) -> bool:
     """Whether hwnd's APPLICATION is the active one.
 
@@ -320,7 +410,66 @@ def _force_foreground(root: int) -> None:
             user32.AttachThreadInput(current, other, False)
 
 
-def require_foreground(hwnd, what: str = "input", timeout: float = 1.2) -> bool:
+#: OpenInputDesktop's DESKTOP_SWITCHDESKTOP access.
+_DESKTOP_SWITCHDESKTOP = 0x0100
+
+
+def input_desktop_available() -> bool:
+    """Whether this session currently receives input at all.
+
+    MEASURED with the remote desktop session disconnected: OpenInputDesktop
+    fails with access denied, GetCursorPos fails and GetForegroundWindow
+    is NULL for every process, while Altium stays visible, responsive and
+    not hung. A locked session behaves the same way. No synthesised event
+    can reach any window then, so there is nothing to wait for.
+    """
+    user32 = ctypes.windll.user32
+    desk = user32.OpenInputDesktop(0, False, _DESKTOP_SWITCHDESKTOP)
+    if not desk:
+        return False
+    user32.CloseDesktop(desk)
+    return True
+
+
+#: How long an activation may stay pending on a busy target. A bridge
+#: command or a modal wait holds Altium's UI thread for seconds at a time.
+_BUSY_TIMEOUT = 10.0
+
+
+def _wait_out_pending_activation(timeout: float) -> None:
+    """Wait while Windows reports NO active window at all.
+
+    MEASURED: SetForegroundWindow on a window whose thread services only
+    sent messages (a COM call, a modal wait, a bridge command on Altium's
+    UI thread) returns success, and GetForegroundWindow then returns NULL
+    until that thread next reads input, when the target becomes active.
+    A NULL is therefore an activation in flight, not another application
+    in front, and is waited out instead of refused. Input is still never
+    sent until the target is confirmed active.
+    """
+    if foreground_pid() is None:
+        wait_until(lambda: foreground_pid() is not None, timeout, poll=0.05)
+
+
+def _not_foreground_reason(what: str, target: int, root: int,
+                           busy_timeout: float) -> str:
+    got = foreground_pid()
+    if got is not None:
+        return (f"refusing to send {what}: the target could not be brought "
+                f"to the front and the active window belongs to process "
+                f"{got}, not {target}. Synthesised input goes to whatever is "
+                f"active, so this would have gone elsewhere")
+    hung = bool(ctypes.windll.user32.IsHungAppWindow(root))
+    return (f"refusing to send {what}: Windows reports no active window. "
+            f"The activation of process {target} was still pending after "
+            f"{busy_timeout:.0f}s, which is what a target whose UI thread is "
+            f"busy and not reading input looks like"
+            f"{' (Windows marks it not responding)' if hung else ''}. "
+            f"Retry once Altium is idle")
+
+
+def require_foreground(hwnd, what: str = "input", timeout: float = 1.2,
+                       busy_timeout: float = _BUSY_TIMEOUT) -> bool:
     """Make the target active, then confirm it, IMMEDIATELY BEFORE an event.
 
     SYNTHESISED INPUT IS NOT ADDRESSED TO A WINDOW. keybd_event and
@@ -354,6 +503,12 @@ def require_foreground(hwnd, what: str = "input", timeout: float = 1.2) -> bool:
             f"refusing to send {what}: the target window is gone")
     if foreground_pid() == target:
         return False
+    if not input_desktop_available():
+        raise ForegroundLost(
+            f"refusing to send {what}: this Windows session is not "
+            f"receiving input (remote desktop disconnected, or the session "
+            f"locked), so there is no active window and no synthesised "
+            f"event can reach Altium. Reconnect or unlock, then retry")
 
     user32 = ctypes.windll.user32
     root = user32.GetAncestor(int(hwnd), _GA_ROOT) or int(hwnd)
@@ -362,13 +517,11 @@ def require_foreground(hwnd, what: str = "input", timeout: float = 1.2) -> bool:
         wait_until(lambda: not user32.IsIconic(root), timeout)
     _force_foreground(root)
     wait_until(lambda: foreground_pid() == target, timeout)
+    _wait_out_pending_activation(busy_timeout)
 
     if foreground_pid() != target:
         raise ForegroundLost(
-            f"refusing to send {what}: the target could not be brought to "
-            f"the front and the active window belongs to process "
-            f"{foreground_pid()}, not {target}. Synthesised input goes to "
-            f"whatever is active, so this would have gone elsewhere")
+            _not_foreground_reason(what, target, root, busy_timeout))
     return True
 
 
@@ -665,7 +818,7 @@ def capture(hwnd: int) -> Optional[Window]:
                         class_name=win32gui.GetClassName(hwnd),
                         title=win32gui.GetWindowText(hwnd),
                         pid=win32process.GetWindowThreadProcessId(hwnd)[1])
-    except Exception:
+    except pywintypes.error:  # destroyed since IsWindow; see the docstring
         return None
 
     def visit(child, _):
@@ -692,8 +845,7 @@ def capture(hwnd: int) -> Optional[Window]:
 
     try:
         win32gui.EnumChildWindows(hwnd, visit, None)
-    except Exception:
-        # A window with no children raises rather than returning empty.
+    except pywintypes.error:  # a window with no children raises, not returns empty
         pass
     return window
 
@@ -835,8 +987,18 @@ _KEYS = {
     "home": 0x24, "end": 0x23, "pageup": 0x21, "pagedown": 0x22,
     "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73, "f5": 0x74,
     "f6": 0x75, "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79,
-    "f11": 0x7A, "f12": 0x7B,
+    "f11": 0x7A, "f12": 0x7B, "insert": 0x2D, "ins": 0x2D,
 }
+# Letters and digits: their virtual-key codes are the upper-case ASCII
+# codes. send_keys documented "ctrl+s" while the table had no letters,
+# so every letter chord was refused (issue #94).
+_KEYS.update({chr(c).lower(): c for c in range(ord("A"), ord("Z") + 1)})
+_KEYS.update({str(d): 0x30 + d for d in range(10)})
+
+#: How a refusal names the known keys, without listing 36 letters.
+_KEYS_HELP = ("a-z, 0-9, enter, escape, tab, space, backspace, delete, "
+              "insert, up, down, left, right, home, end, pageup, pagedown, "
+              "f1-f12")
 
 #: Modifier virtual-key codes, held down around a key in a chord.
 _MODIFIERS = {"ctrl": 0x11, "control": 0x11, "alt": 0x12, "shift": 0x10}
@@ -870,7 +1032,7 @@ def press_key(hwnd: int, key: str) -> bool:
     code = _KEYS.get(key.lower())
     if code is None:
         raise ValueError(f"unsupported key {key!r}; use one of "
-                         f"{sorted(_KEYS)}")
+                         f"{_KEYS_HELP}")
     try:
         win32gui.SetForegroundWindow(hwnd)
     except Exception:                            # pragma: no cover - guard
@@ -946,7 +1108,7 @@ def send_keys(sequence: str, hold: float = 0.03, target=None) -> dict:
         if key not in _KEYS:
             return {"ok": False, "reason": (
                 f"{key!r} is not a known key. Known: "
-                f"{', '.join(sorted(_KEYS))}"), "sent": sent}
+                f"{_KEYS_HELP}"), "sent": sent}
 
         for code in codes:
             if target is not None:
@@ -999,17 +1161,31 @@ def type_text(text: str, target=None) -> dict:
 
 #: Mouse event flags. Absolute coordinates are normalised to 0..65535
 #: across the virtual desktop, which is the only form that works on a
-#: multi-monitor setup.
-_ME_MOVE, _ME_ABSOLUTE = 0x0001, 0x8000
+#: multi-monitor setup. WITHOUT _ME_VIRTUALDESK the 0..65535 range maps
+#: onto the PRIMARY monitor only, so a point on any other monitor lands
+#: somewhere on the primary one instead.
+_ME_MOVE, _ME_ABSOLUTE, _ME_VIRTUALDESK = 0x0001, 0x8000, 0x4000
+_ME_MOVE_TO = _ME_MOVE | _ME_ABSOLUTE | _ME_VIRTUALDESK
 _ME_LDOWN, _ME_LUP = 0x0002, 0x0004
+_SM_XVIRTUALSCREEN, _SM_YVIRTUALSCREEN = 76, 77
 _SM_CXVIRTUALSCREEN, _SM_CYVIRTUALSCREEN = 78, 79
 
 
-def _to_absolute(x: int, y: int):
-    user32 = ctypes.windll.user32
-    width = user32.GetSystemMetrics(_SM_CXVIRTUALSCREEN) or 1
-    height = user32.GetSystemMetrics(_SM_CYVIRTUALSCREEN) or 1
-    return int(x * 65535 / width), int(y * 65535 / height)
+def _to_absolute(x: int, y: int, metrics=None):
+    """Screen point to mouse_event's normalised virtual-desktop units.
+
+    The virtual desktop's origin is NOT 0,0 when a monitor sits left of
+    or above the primary: it is negative, and screen coordinates are
+    relative to the primary, so the origin is subtracted first.
+    ``metrics`` is (left, top, width, height), for testing off-Windows.
+    """
+    if metrics is None:
+        get = ctypes.windll.user32.GetSystemMetrics
+        metrics = (get(_SM_XVIRTUALSCREEN), get(_SM_YVIRTUALSCREEN),
+                   get(_SM_CXVIRTUALSCREEN), get(_SM_CYVIRTUALSCREEN))
+    left, top, width, height = metrics
+    return (round((x - left) * 65535 / max(width - 1, 1)),
+            round((y - top) * 65535 / max(height - 1, 1)))
 
 
 def drag(x1: int, y1: int, x2: int, y2: int, steps: int = 12, target=None,
@@ -1044,7 +1220,7 @@ def drag(x1: int, y1: int, x2: int, y2: int, steps: int = 12, target=None,
         # delivered elsewhere, but the release can be.
         require_point_in_app(int(x1), int(y1), target, "a drag start")
         require_point_in_app(int(x2), int(y2), target, "a drag end")
-    user32.mouse_event(_ME_MOVE | _ME_ABSOLUTE, ax, ay, 0, 0)
+    user32.mouse_event(_ME_MOVE_TO, ax, ay, 0, 0)
     time.sleep(hold)
     if target is not None:
         require_foreground(target, "a drag press")
@@ -1060,7 +1236,7 @@ def drag(x1: int, y1: int, x2: int, y2: int, steps: int = 12, target=None,
         # wanders while focus changes is drawing in another window.
         if target is not None:
             require_foreground(target, "a drag move")
-        user32.mouse_event(_ME_MOVE | _ME_ABSOLUTE, mx, my, 0, 0)
+        user32.mouse_event(_ME_MOVE_TO, mx, my, 0, 0)
         time.sleep(hold / 2)
 
     # A drag holds the button down across many events, so losing focus
@@ -1093,7 +1269,7 @@ def click_at(x: int, y: int, double: bool = False, target=None) -> dict:
     if target is not None:
         require_foreground(target, "a pointer move")
         require_point_in_app(int(x), int(y), target, "a click")
-    user32.mouse_event(_ME_MOVE | _ME_ABSOLUTE, ax, ay, 0, 0)
+    user32.mouse_event(_ME_MOVE_TO, ax, ay, 0, 0)
     time.sleep(0.05)
     for _ in range(2 if double else 1):
         if target is not None:

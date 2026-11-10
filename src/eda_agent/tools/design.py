@@ -41,6 +41,7 @@ from ..design.component_values import (
     resistor_divider,
 )
 from ..design.discipline import get_discipline
+from ..design import fab_library
 from ..design.fab_profile import load_fab_profile
 from ..design.hierarchy import apply_hierarchy, plan_hierarchy
 from ..design.requirement import (
@@ -86,26 +87,65 @@ def _divider_payload(r, series: str, mode: str) -> dict[str, Any]:
     }
 
 
+#: Entries a list in a job result keeps inline; the rest go to a file.
+_JOB_LIST_INLINE = 25
+
+
+def _trim_job_result(rec: dict, job_id: str) -> dict:
+    """``rec`` with each long list in its result cut to its first entries
+    and counted, the whole of it written to the workspace."""
+    import json
+
+    from ..config import get_config
+
+    result = dict(rec["result"])
+    trimmed = {}
+    for key, value in list(result.items()):
+        if isinstance(value, list) and len(value) > _JOB_LIST_INLINE:
+            trimmed[key] = len(value)
+            result[key] = value[:_JOB_LIST_INLINE]
+    out = dict(rec, result=result)
+    if trimmed:
+        folder = get_config().workspace_dir / "jobs"
+        folder.mkdir(parents=True, exist_ok=True)
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in job_id)
+        path = folder / f"{safe}.json"
+        path.write_text(json.dumps(rec, default=str), encoding="utf-8")
+        out["trimmed"] = {k: f"{n} entries, first {_JOB_LIST_INLINE} shown"
+                          for k, n in trimmed.items()}
+        out["full_path"] = str(path)
+    return out
+
+
 def register_design_tools(mcp) -> None:
     """Register the design-agent tools with the MCP server."""
 
     @mcp.tool()
-    async def design_get_discipline() -> dict[str, Any]:
-        """Read the design discipline + DesignPlan JSON schema.
+    async def design_get_discipline(include_schema: bool = False) -> dict[str, Any]:
+        """Read the design discipline, and on request the DesignPlan schema.
 
         ALWAYS call this first when starting a design task. The result
-        contains the hard rules the planner must follow (net-label-driven
-        wiring, datasheet-first part choice, NDA isolation, etc.) plus
-        the JSON schema that ``sch_draw_template`` takes as ``plan_json``.
+        contains the hard rules the planner must follow (datasheet-first
+        part choice, NDA isolation, the template method for schematics,
+        placement and routing discipline).
+
+        Args:
+            include_schema: Also return the DesignPlan JSON schema, which
+                the plan tools (design_validate_plan, design_review_plan,
+                design_compose_netlist) take. A schematic drawn from
+                templates does not need it.
 
         Returns:
-            A dict with ``discipline`` (markdown text) and
+            A dict with ``discipline`` (markdown text) and, when asked,
             ``schema`` (DesignPlan JSON schema as a dict).
         """
-        return {
-            "discipline": get_discipline(),
-            "schema": DesignPlan.model_json_schema(),
-        }
+        # Under one tool result: with the schema always in, the reply was
+        # 52.5 KB and Claude Code set it aside in a file under the user's
+        # profile, whose path it then showed on screen.
+        out: dict[str, Any] = {"discipline": get_discipline(include_schema=False)}
+        if include_schema:
+            out["schema"] = DesignPlan.model_json_schema()
+        return out
 
     # --- session journal (autonomy-harness durable state) ----------------
 
@@ -438,6 +478,9 @@ def register_design_tools(mcp) -> None:
           loops, worst first. Advisory.
         - ``pad_entry_audit``: off-axis, off-centre, too-wide or uneven
           pad entries. Fails only on high severity.
+        - ``rotation_audit``: parts whose connections are shorter turned
+          90, 180 or 270 degrees, a turn into a neighbour's courtyard
+          excluded. Advisory.
 
         Log the result as ``data`` on the stage_result
         (``design_session_log``).
@@ -512,12 +555,16 @@ def register_design_tools(mcp) -> None:
 
     # --- async jobs (engine runs that outlive a tool timeout) ------------
 
+    #: Longest design_job_status holds a call: under the client's 120 s.
+    _JOB_WAIT_CAP_S = 100.0
+
     @mcp.tool()
     async def design_job_start(kind: str, params: dict) -> dict[str, Any]:
         """Start a long engine run as a background job; returns its id.
 
         For work that can exceed the MCP tool timeout (routing a dense
-        board). Poll `design_job_status`, then `design_job_result` when done.
+        board). Call `design_job_status` with ``wait_seconds`` until it is
+        done (nothing notifies you), then `design_job_result`.
 
         Args:
             kind: registered job kind. Currently: ``route`` (offline A*
@@ -537,21 +584,53 @@ def register_design_tools(mcp) -> None:
         return {"job_id": job_id, "kind": kind}
 
     @mcp.tool()
-    async def design_job_status(job_id: str = "") -> dict[str, Any]:
-        """Status of a background job (or all jobs if ``job_id`` is blank)."""
+    async def design_job_status(job_id: str = "", wait_seconds: float = 0) -> dict[str, Any]:
+        """Status of a background job (or all jobs if ``job_id`` is blank).
+
+        Nothing tells you when a job finishes, so keep calling this until
+        it is done rather than ending your turn: a session that stopped to
+        "check when it finishes" was never woken again.
+
+        Args:
+            job_id: the job; blank lists every job.
+            wait_seconds: hold the call until the job finishes or this
+                many seconds pass (capped at 100, inside the client's
+                two-minute limit). 0 answers at once.
+        """
+        import asyncio
+
         from ..design.jobs import get_job_store
         store = get_job_store()
         if not job_id:
             return {"jobs": store.list()}
+        wait = max(0.0, min(float(wait_seconds or 0), _JOB_WAIT_CAP_S))
+        if wait and store.get(job_id) is not None:
+            await asyncio.to_thread(store.wait, job_id, wait)
         rec = store.status(job_id)
         return rec if rec else {"error": f"no such job: {job_id}"}
 
     @mcp.tool()
-    async def design_job_result(job_id: str) -> dict[str, Any]:
-        """Fetch a finished job's result payload (None until it's done)."""
+    async def design_job_result(job_id: str, full: bool = False) -> dict[str, Any]:
+        """Fetch a finished job's result payload (None until it's done).
+
+        A router result lists every track and via, which ran to 250,000
+        characters on a 61-LED board; the client set it aside in a file
+        instead of reading it. So any list longer than a few dozen
+        entries comes back as its count and first entries, and the whole
+        result is written to ``full_path`` (pcb_autoroute_apply takes the
+        tracks from the job itself, not from this reply).
+
+        Args:
+            job_id: the job.
+            full: return every entry inline, however long.
+        """
         from ..design.jobs import get_job_store
         rec = get_job_store().result(job_id)
-        return rec if rec else {"error": f"no such job: {job_id}"}
+        if not rec:
+            return {"error": f"no such job: {job_id}"}
+        if full or not isinstance(rec.get("result"), dict):
+            return rec
+        return _trim_job_result(rec, job_id)
 
     @mcp.tool()
     async def design_snapshot_inventory(
@@ -1804,6 +1883,8 @@ def register_design_tools(mcp) -> None:
                     board = await asyncio.to_thread(read_live_board, expect_file)
                 except WrongBoard as exc:
                     return {"ok": False, "error": str(exc)}
+                except Exception as exc:  # noqa: BLE001 - reported to the caller
+                    return {"ok": False, "error": f"board read failed: {exc}"}
                 source = "live"
             loops = await asyncio.to_thread(analyze_loops, board, pin_names,
                                             kinds)
@@ -1830,6 +1911,51 @@ def register_design_tools(mcp) -> None:
         from ..sim.ngspice import simulator_backends
 
         return await asyncio.to_thread(simulator_backends)
+
+    @mcp.tool()
+    async def design_simulate_deck(
+        deck: str,
+        engine: str = "auto",
+        waves: Optional[list[str]] = None,
+        points: int = 0,
+        timeout_s: float = 120,
+    ) -> dict[str, Any]:
+        """Simulate a SPICE deck in ngspice or LTspice on this machine and
+        return its .meas values, errors and waveforms.
+
+        ``engine`` "auto" uses ngspice when it is installed and LTspice
+        when only LTspice is; name "ltspice" or "ngspice" to choose. Both
+        return the same shape. Altium's own simulator runs a deck through
+        sim_run_deck instead.
+
+        The deck is screened first: .ferret is refused, and .include/.lib
+        may only name a bare file or one in the workspace or
+        EDA_AGENT_SPICE_MODEL_DIRS. An IC needs its manufacturer's model
+        (SPICE_MODEL_RULES); this simulates whatever it is given. LTspice
+        refuses a .control block, which is ngspice's.
+
+        Args:
+            deck: The SPICE text, with an analysis (.tran, .ac, .dc, .op)
+                and any .meas lines.
+            engine: "auto", "ngspice" or "ltspice".
+            waves: Traces to report (e.g. ["V(out)"]); empty reports all.
+            points: Also return this many samples of each trace in
+                ``waves`` (AC traces in dB and degrees).
+            timeout_s: Stop the simulator after this many seconds.
+
+        Returns:
+            ``engine`` and ``why``, ``measures`` ({name: value}),
+            ``errors``, ``warnings``, ``plots`` (per analysis, each trace's
+            min, max, first and last), ``run_folder`` and ``log_tail``;
+            ``install_offers`` when no simulator is installed.
+        """
+        import asyncio
+
+        from ..config import get_config
+        from ..sim.deck_runner import simulate
+
+        return await asyncio.to_thread(simulate, deck, get_config().workspace_dir, engine,
+                                       timeout_s, waves, max(0, int(points)))
 
     @mcp.tool()
     async def design_simulate_loops(
@@ -1947,6 +2073,95 @@ def register_design_tools(mcp) -> None:
                 "loops": results}
 
     @mcp.tool()
+    async def design_export_spice_deck(
+        plan_json: Union[str, dict],
+        dialect: str = "ngspice",
+        analyses: Optional[dict] = None,
+        models: Optional[dict[str, dict]] = None,
+        supplies: Optional[dict[str, float]] = None,
+        pin_names: Optional[dict[str, dict[str, str]]] = None,
+        path: str = "",
+        allow_partial: bool = False,
+    ) -> dict[str, Any]:
+        """Write a plan's circuit as a SPICE deck for ngspice or LTspice.
+
+        The same netlist design_simulate_loops runs: R, C and L from their
+        values, everything else from the manufacturer's model (``models``,
+        as there), rails as DC sources. ``dialect`` "ltspice" writes a
+        .net LTspice opens and runs as it is; "ngspice" writes a .cir. A
+        plan read off a live sheet comes from design_plan_from_sheet.
+
+        A part without its model is never approximated: the deck is not
+        written and ``gaps`` names what is missing. ``allow_partial``
+        writes it anyway with every gap listed in comments at the top, so
+        the file cannot pass for the whole circuit.
+
+        Args:
+            plan_json: a DesignPlan (object or JSON).
+            dialect: "ngspice" or "ltspice".
+            analyses: {"op": true}, {"tran": {"step", "stop"}},
+                {"ac": {"points", "start", "stop"}} (decade) or {"dc":
+                {"source", "start", "stop", "step"}}; default .op.
+            models / supplies / pin_names: as design_simulate_loops.
+            path: file to write; default <workspace>/sim/<title>.cir|.net.
+            allow_partial: write a deck that is missing parts.
+        """
+        import re as _re
+
+        from ..config import get_config
+        from ..sim.deck import deck_from_plan
+        from ..sim.dialects import deck_gaps, write_deck
+
+        payload = plan_json
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError as exc:
+                return {"ok": False, "error": f"invalid JSON: {exc}"}
+        try:
+            plan = DesignPlan.model_validate(payload)
+        except ValidationError as exc:
+            return {"ok": False, "errors": [
+                f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}"
+                for e in exc.errors()]}
+        deck = deck_from_plan(plan, models or {}, supplies, pin_names,
+                              title=plan.summary or "")
+        gaps = deck_gaps(deck)
+        out: dict[str, Any] = {
+            "ok": False, "dialect": dialect, "complete": not gaps,
+            "gaps": gaps, "rails": deck.get("rails"),
+            "missing_models": deck.get("missing_models")}
+        if gaps and not allow_partial:
+            out["reason"] = ("the deck is missing parts, so it was not "
+                             "written; give their models, or allow_partial "
+                             "to write it with the gaps listed")
+            return out
+        try:
+            text = write_deck(deck["netlist"], dialect, analyses,
+                              gaps if gaps else None)
+        except ValueError as exc:
+            out["reason"] = str(exc)
+            return out
+        ext = ".net" if dialect.lower() == "ltspice" else ".cir"
+        if path:
+            target = Path(path)
+        else:
+            stem = _re.sub(r"[^A-Za-z0-9._-]+", "_",
+                           plan.summary or "design").strip("._")[:60] or "design"
+            target = get_config().workspace_dir / "sim" / f"{stem}{ext}"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        except OSError as exc:
+            out["reason"] = f"could not write {target}: {exc}"
+            return out
+        out.update(ok=True, path=str(target), deck=text)
+        if dialect.lower() == "ltspice":
+            out["note"] = ("open it in LTspice (File > Open, then Run), or run it "
+                           "here with design_simulate_deck(engine='ltspice')")
+        return out
+
+    @mcp.tool()
     async def pcb_smart_drc(
         board_json_path: str = "",
         expect_file: str = "",
@@ -1995,6 +2210,8 @@ def register_design_tools(mcp) -> None:
                 board = await asyncio.to_thread(read_live_board, expect_file)
             except WrongBoard as exc:
                 return {"ok": False, "error": str(exc)}
+            except Exception as exc:  # noqa: BLE001 - reported to the caller
+                return {"ok": False, "error": f"board read failed: {exc}"}
             source = "live"
         result = await asyncio.to_thread(
             smart_drc, board, spacing_mils=spacing_mils, probe_mils=probe_mils,
@@ -2181,7 +2398,13 @@ def register_design_tools(mcp) -> None:
 
         Returns:
             ``ok`` / ``plan`` (a DesignPlan dict, or None on a refusal) /
-            ``parts_read`` / ``nets_read`` / ``dropped_pins`` / ``notes``.
+            ``parts_read`` / ``nets_read`` / ``dropped_pins`` / ``notes``,
+            and ``complete``: false when anything on the sheet is not in
+            the plan. ``interfaces_not_in_plan`` lists each lost
+            connection as ``{refdes, pin, net, why, is_rail}`` and
+            ``skipped_components`` the parts left out. A redraw from an
+            incomplete plan drops them: restore each one and compare the
+            netlists before keeping it.
         """
         return plan_from_live_sheet(project_path, sheet_document)
 
@@ -2323,6 +2546,150 @@ def register_design_tools(mcp) -> None:
                 f"drill {prof.min_drill_mils:g} mils."
             ),
         }
+
+    @mcp.tool()
+    async def design_list_fab_vendors() -> dict[str, Any]:
+        """Fab houses whose published capabilities ship with this server.
+
+        Each has its capability page, the day it was read, whether that
+        is over a year ago (``stale``), its tiers and how many stack-ups
+        it has. Nothing here is recalled: every figure was read off the
+        fab's page and carries the fab's own words.
+
+        Returns:
+            ``{"ok": True, "vendors": [...], "laminates": [...]}``; each
+            laminate with its design Dk.
+        """
+        return {"ok": True, "vendors": fab_library.list_vendors(),
+                "laminates": fab_library.list_laminates()}
+
+    @mcp.tool()
+    async def design_fab_vendor_profile(
+        vendor: str,
+        copper_layers: int = 0,
+        outer_oz: float = 1.0,
+        tier: str = "standard",
+        fill: Optional[dict] = None,
+    ) -> dict[str, Any]:
+        """A fab profile for one build at a fab, ready for
+        ``design_synthesize_rules``, with every value's source.
+
+        Minimums depend on the build: JLCPCB's track is 4 mil on two
+        layers, 3.5 mil on four, and grows with copper weight. The
+        profile is built for the layer count and outer copper given.
+        A figure the fab does not publish is never filled in here: the
+        profile is refused, naming each one, until ``fill`` supplies it
+        (recorded as yours, not the fab's). PCBWay's standard table, for
+        one, gives no hole-to-hole or mask bridge; its ``advanced_normal``
+        tier does.
+
+        With ``copper_layers`` 0, returns the vendor's raw figures with
+        their quotes instead.
+
+        Args:
+            vendor: a fab from design_list_fab_vendors ("JLCPCB",
+                "Eurocircuits", "Sierra Circuits", ...)
+            copper_layers: copper layer count of the board
+            outer_oz: outer copper weight, oz
+            tier: the vendor's tier, "standard" by default
+            fill: {FabProfile field: mils} for figures the fab does not
+                publish, e.g. {"min_hole_to_hole_mils": 10}
+
+        Returns:
+            ``{"ok": True, "profile": {...}, "provenance": {field:
+            {quote, ...}}, "age": {...}}`` or ``{"ok": False, "missing":
+            [{field, reason}], ...}``.
+        """
+        if not copper_layers:
+            return fab_library.vendor(vendor)
+        got = fab_library.fab_profile(vendor, copper_layers=copper_layers,
+                                      outer_oz=outer_oz, tier=tier, fill=fill)
+        if got.get("ok"):
+            got["profile"] = got["profile"].model_dump()
+        return got
+
+    @mcp.tool()
+    async def design_list_stackups(
+        vendor: str = "", copper_layers: int = 0,
+    ) -> dict[str, Any]:
+        """The fabs' own stack-ups that ship with this server.
+
+        JLCPCB's are parsed ply by ply from its impedance page (36 at
+        1.6 mm, 4 and 6 layers), so every height and Dk is JLCPCB's.
+
+        Args:
+            vendor: limit to one fab ("" for all)
+            copper_layers: limit to one copper count (0 for all)
+
+        Returns:
+            ``{"ok": True, "stackups": [{name, vendor, copper_layers,
+            total_mm, dielectrics}]}``.
+        """
+        return {"ok": True, "stackups": fab_library.stackup_templates(
+            vendor or None, copper_layers or None)}
+
+    @mcp.tool()
+    async def design_get_stackup(
+        name: str,
+        impedance_targets: Optional[list] = None,
+        board_stackup: Optional[dict] = None,
+    ) -> dict[str, Any]:
+        """One fab stack-up ply by ply, with optional trace widths for
+        target impedances and an optional comparison against a board.
+
+        Widths: outer layers as microstrip over the dielectric to the next
+        copper; an inner layer only when it sits near the middle of its
+        two planes (the closed form is symmetric; otherwise it is reported
+        and not sized). Closed forms are +/-10 %, so these are starting
+        widths for the fab's solver to confirm.
+
+        Args:
+            name: stack-up name, e.g. "JLC04161H-7628"
+            impedance_targets: e.g. [{"ohms": 50}, {"ohms": 90,
+                "spacing_mils": 6}] (spacing makes it differential)
+            board_stackup: a ``pcb_get_layer_stackup`` result to compare
+                with; the template's plies are first collapsed to one
+                dielectric per copper gap, as Altium keeps them
+
+        Returns:
+            ``{"ok": True, "stackup": {...}, "plies": [...], "source":
+            {...}, "impedance": {...}?, "comparison": {...}?}``.
+        """
+        got = fab_library.stackup_template(name)
+        if not got["ok"]:
+            return got
+        got["stackup"] = got["stackup"].model_dump()
+        if impedance_targets:
+            got["impedance"] = fab_library.impedance_widths(name, impedance_targets)
+        if board_stackup:
+            got["comparison"] = fab_library.compare_stackup(board_stackup, name)
+        return got
+
+    @mcp.tool()
+    async def design_get_laminate(
+        name: str, frequency_ghz: float = 0.0,
+    ) -> dict[str, Any]:
+        """A laminate's datasheet figures and the Dk to design with.
+
+        Makers publish different kinds of Dk: Rogers a process value (a QC
+        test) AND a design value 5 % higher, Isola and Panasonic typical
+        values by frequency. Each figure here says which it is, with its
+        frequency, method and datasheet. The returned design Dk is the
+        design value when there is one, else the typical value nearest
+        ``frequency_ghz``; never a process value.
+
+        Args:
+            name: e.g. "RO4350B", "370HR", "MEGTRON 6" (prefix matches)
+            frequency_ghz: the frequency to pick a typical Dk at (0: the
+                highest listed)
+
+        Returns:
+            The laminate record plus the design Dk it chose and why.
+        """
+        got = fab_library.laminate(name)
+        if got["ok"]:
+            got["design_dk"] = fab_library.design_dk(name, frequency_ghz or None)
+        return got
 
     @mcp.tool()
     async def design_synthesize_rules(
@@ -2473,3 +2840,127 @@ def register_design_tools(mcp) -> None:
                 + "."
             ),
         }
+
+    # --- stages to production: feasibility, prototype, EVT, DVT, PVT -------
+
+    def _ledger(product: str):
+        from ..config import get_config
+        from ..design.phase_gates import Ledger, ledger_name
+        return Ledger(get_config().workspace_dir / "phase_gates" / ledger_name(product))
+
+    def _line_json(line, with_reason: bool) -> dict[str, Any]:
+        check = line.check
+        out: dict[str, Any] = {"key": check.key, "asks": check.asks,
+                               "outcome": line.outcome, "required": check.required,
+                               "done_when": check.done_when,
+                               "answered_by": "tools" if check.tools else "people"}
+        if check.tools:
+            from .folds import call_form
+            out["tools"] = list(dict.fromkeys(call_form(n) for n in check.tools))
+        if with_reason:
+            out["why_now"] = check.reason
+        if line.answer is not None:
+            a = line.answer
+            out["answer"] = {"outcome": a.outcome, "source": a.source, "detail": a.detail,
+                             "revision": a.revision,
+                             "when": a.when.isoformat(timespec="seconds")}
+        if line.ignored_because:
+            out["ignored_because"] = line.ignored_because
+        return out
+
+    @mcp.tool()
+    async def design_phase_gate(stage: str, revision: str = "", product: str = "default",
+                                with_reasons: bool = True) -> dict[str, Any]:
+        """The checks that close one stage on the way to production, and how
+        the product stands against them.
+
+        The stages in order: feasibility, prototype, evt, dvt, pvt. Each check
+        says what it asks, why at this stage, what counts as done, which tools
+        here answer it, and its outcome from the answers recorded so far. It
+        runs nothing: call ``tools_to_run``, then record each result with
+        design_phase_answer. ``for_people`` are the holding checks no tool
+        can answer.
+
+        Args:
+            stage: feasibility, prototype, evt, dvt or pvt (also "design
+                validation" and similar).
+            revision: The board revision in question; answers given for
+                another revision stop counting, and the check says so.
+            product: Whose ledger, when there are several products.
+            with_reasons: Include each check's ``why_now``.
+
+        Returns:
+            ``cleared``, ``tally``, ``checks``, ``holding``, ``tools_to_run``
+            and ``for_people``.
+        """
+        from ..design.phase_gates import TITLES, review, stage_from
+        try:
+            name = stage_from(stage)
+        except ValueError as exc:
+            return {"ok": False, "reason": str(exc)}
+        result = review(name, _ledger(product).answers(), revision)
+        return {"stage": name, "title": TITLES[name], "product": product,
+                "revision": revision, "cleared": result.cleared, "tally": result.tally(),
+                "checks": [_line_json(line, with_reasons) for line in result.lines],
+                "holding": [line.check.key for line in result.holding()],
+                "tools_to_run": result.tools_to_run(),
+                "for_people": result.for_people()}
+
+    @mcp.tool()
+    async def design_phase_answer(key: str, outcome: str, detail: str = "",
+                                  source: str = "", revision: str = "",
+                                  product: str = "default") -> dict[str, Any]:
+        """Record the answer to one stage check in the product's ledger.
+
+        The ledger is only appended to: a new answer replaces the old one in
+        reviews and both stay on file. A waiver needs a ``detail``; months
+        later an unexplained waiver cannot be told from a skipped check.
+
+        Args:
+            key: The check's key from design_phase_gate, e.g. "prototype:drc".
+            outcome: met, unmet, waived or open.
+            detail: The evidence: a count, a measurement, a document.
+            source: The tool that answered, or the person who confirmed it.
+            revision: The board revision it applies to.
+            product: Whose ledger.
+
+        Returns:
+            The check's stage reviewed again: ``stage_cleared``, ``tally``
+            and ``holding``.
+        """
+        from ..design.phase_gates import CHECKS, review
+        ledger = _ledger(product)
+        try:
+            ledger.add(key, outcome, source=source, detail=detail, revision=revision)
+        except ValueError as exc:
+            return {"ok": False, "reason": str(exc)}
+        stage = CHECKS[key].stage
+        result = review(stage, ledger.answers(), revision)
+        return {"ok": True, "key": key, "outcome": outcome, "stage": stage,
+                "stage_cleared": result.cleared, "tally": result.tally(),
+                "holding": [line.check.key for line in result.holding()]}
+
+    @mcp.tool()
+    async def design_phase_standing(revision: str = "",
+                                    product: str = "default") -> dict[str, Any]:
+        """Which stage the product is in, and what that stage still needs.
+
+        A product is in the FIRST stage that does not clear, however much
+        work exists beyond it: a board whose feasibility checks never closed
+        is in feasibility.
+
+        Returns:
+            ``stage``, ``title``, ``in_production`` (every stage cleared),
+            that stage's ``holding`` and ``tools_to_run``, and ``stages``
+            (each one's ``cleared``, ``tally`` and ``holding``).
+        """
+        from ..design.phase_gates import DONE, TITLES, standing
+        stage, reviews = standing(_ledger(product).answers(), revision)
+        current = next((r for r in reviews if r.stage == stage), None)
+        return {"product": product, "revision": revision, "stage": stage,
+                "title": TITLES[stage], "in_production": stage == DONE,
+                "holding": [line.check.key for line in current.holding()] if current else [],
+                "tools_to_run": current.tools_to_run() if current else [],
+                "stages": [{"stage": r.stage, "cleared": r.cleared, "tally": r.tally(),
+                            "holding": [line.check.key for line in r.holding()]}
+                           for r in reviews]}

@@ -30,10 +30,16 @@ authoritative signal, because that one is read exactly.
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
+import sys
 import tempfile
 
+import psutil
+
+from ..noconsole import no_window
+from ..atomicfile import replace_with_retry
 from . import windows as win
 
 #: PrintWindow flag. Renders the full window content including anything
@@ -41,11 +47,16 @@ from . import windows as win
 #: window is partly obscured.
 _PW_RENDERFULLCONTENT = 0x00000002
 
+# PrintWindow sends work to the target UI thread and has no timeout. A
+# hung Altium command must not also hang screenshots and crash recovery.
+_CAPTURE_TIMEOUT_S = 5.0
+_LOG = logging.getLogger(__name__)
+
 #: WinRT's OCR pipeline is async, and PowerShell 5.1 cannot await an
 #: IAsyncOperation directly, hence the AsTask reflection dance. Kept as
 #: a file rather than an inline -Command so quoting cannot corrupt it.
 _OCR_PS1 = r"""
-param([Parameter(Mandatory=$true)][string]$Path)
+param([Parameter(Mandatory=$true)][string]$Path, [switch]$Words)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Runtime.WindowsRuntime | Out-Null
 
@@ -75,7 +86,14 @@ $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
 if ($null -eq $engine) { throw 'no OCR language pack is installed' }
 
 $result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])
-foreach ($line in $result.Lines) { Write-Output $line.Text }
+if ($Words) {
+    foreach ($line in $result.Lines) { foreach ($w in $line.Words) {
+        $r = $w.BoundingRect
+        Write-Output ("{0}`t{1}`t{2}`t{3}" -f [int]$r.X, [int]$r.Y, [int]$r.Height, $w.Text)
+    } }
+} else {
+    foreach ($line in $result.Lines) { Write-Output $line.Text }
+}
 """
 
 
@@ -91,8 +109,101 @@ def available() -> bool:
     return os.name == "nt"
 
 
-def capture_png(hwnd: int, path: str) -> bool:
-    """Render a window to a PNG. True when it worked.
+def _capture_command(hwnd: int, path: str, enlarge: int) -> list[str]:
+    return [sys.executable, "-m", "eda_agent.ui.ocr", str(hwnd), path,
+            str(enlarge)]
+
+
+def _run_capture(command: list[str], timeout: float) -> int:
+    # stdin closed too: inherited, the worker shares the MCP server's stdio
+    # pipe, and a native module load in it can then wait on that pipe.
+    proc = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, **no_window())
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Windows' venv python.exe may be a launcher with a second Python
+        # process underneath it. Kill descendants before their parent, while
+        # the relationship is still available, then wait for their exits.
+        children = []
+        try:
+            children = psutil.Process(proc.pid).children(recursive=True)
+        except psutil.Error:
+            pass
+        for child in reversed(children):
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass
+            except psutil.Error as exc:
+                _LOG.warning("capture descendant cleanup failed: %s", exc)
+        # A denied descendant must not skip root cleanup. Keep each attempt
+        # independent and preserve the original timeout for the caller.
+        try:
+            proc.kill()
+        except OSError as exc:
+            _LOG.warning("capture worker termination failed: %s", exc)
+        try:
+            proc.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            _LOG.warning("capture worker did not exit during cleanup: %s", exc)
+        try:
+            _, alive = psutil.wait_procs(children, timeout=1)
+            if alive:
+                _LOG.warning("capture descendants still alive after cleanup: %s",
+                             [child.pid for child in alive])
+        except psutil.Error as exc:
+            _LOG.warning("capture descendant wait failed: %s", exc)
+        raise
+
+
+def capture_png(hwnd: int, path: str, enlarge: int = 1, *,
+                timeout: float = _CAPTURE_TIMEOUT_S) -> bool:
+    """Render a window to a PNG within ``timeout`` seconds.
+
+    PrintWindow can wait forever for an unresponsive UI thread. Run it in
+    a disposable hidden process, attempting to terminate its process tree on
+    timeout with up to two seconds for exit cleanup. OS-denied cleanup is
+    logged and cannot guarantee termination. A thread timeout cannot release
+    a stalled PrintWindow call. Failed captures leave an
+    existing destination untouched and remove their partial output.
+
+    ``enlarge`` is for OCR; ordinary screenshots retain their real pixels.
+    """
+    if timeout <= 0 or not available():
+        return False
+    staged = ""
+    try:
+        # Same directory allows an atomic replace, including destinations
+        # on a different drive from the system temporary directory.
+        fd, staged = tempfile.mkstemp(
+            prefix=".eda-capture-", suffix=".png",
+            dir=os.path.dirname(os.path.abspath(path)))
+        os.close(fd)
+        result = _run_capture(
+            _capture_command(int(hwnd), staged, int(enlarge)),
+            timeout=timeout)
+        if result != 0 or os.path.getsize(staged) == 0:
+            return False
+        replace_with_retry(staged, path)
+        return True
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    finally:
+        if staged:
+            try:
+                os.remove(staged)
+            except OSError:
+                pass
+
+
+def _capture_png_inline(hwnd: int, path: str, enlarge: int = 1) -> bool:
+    """Worker-only Win32 capture. Never call in the MCP process.
+
+    ``enlarge`` multiplies the size, which only the text recogniser
+    wants; a screenshot stays at the window's real pixels so that it can
+    be measured.
 
     PrintWindow asks the window to draw ITSELF, so the capture is
     correct even when the dialog is behind something else or off the
@@ -106,6 +217,9 @@ def capture_png(hwnd: int, path: str) -> bool:
     import win32ui
     from PIL import Image
 
+    # This subprocess does not inherit the MCP process's DPI awareness.
+    # Initialize before reading rectangles so bitmap size uses physical pixels.
+    win._make_dpi_aware()
     left, top, right, bottom = win32gui.GetWindowRect(hwnd)
     width, height = right - left, bottom - top
     if width <= 0 or height <= 0:
@@ -131,7 +245,10 @@ def capture_png(hwnd: int, path: str) -> bool:
             bitmap.GetBitmapBits(True), "raw", "BGRX", 0, 1)
         # Upscaling helps the recogniser on small UI type, which is
         # usually 8 or 9 point and sits near its resolution limit.
-        image = image.resize((width * 2, height * 2), Image.LANCZOS)
+        # Screenshots are left at size: doubled they hold no more detail
+        # and give wrong measurements.
+        if enlarge > 1:
+            image = image.resize((width * enlarge, height * enlarge), Image.LANCZOS)
         image.save(path)
         return True
     finally:
@@ -141,26 +258,71 @@ def capture_png(hwnd: int, path: str) -> bool:
         win32gui.DeleteObject(bitmap.GetHandle())
 
 
+def _capture_worker(argv: list[str]) -> int:
+    """The child process entry point; no GUI or input is synthesized."""
+    if len(argv) != 3:
+        return 2
+    try:
+        return 0 if _capture_png_inline(int(argv[0]), argv[1], int(argv[2])) else 1
+    except Exception:                              # noqa: BLE001
+        return 1
+
+
 def read_window_text(hwnd: int, timeout: float = 30.0) -> list:
     """Every line of text OCR can find in a window. Empty on failure.
 
     Never raises: this is a best-effort enrichment of a report that must
     still be produced when it cannot run.
     """
+    return _recognise(hwnd, timeout, words=False)
+
+
+def read_window_rows(hwnd: int, timeout: float = 30.0) -> list:
+    """The window's text as screen rows, left to right. Empty on failure.
+
+    Line mode splits a grid by column, so a message loses the row it
+    belongs to; here every word is placed by its position and words whose
+    vertical centres agree form one row.
+    """
+    return rows_from_words(_recognise(hwnd, timeout, words=True))
+
+
+def rows_from_words(lines: list) -> list:
+    """Group ``x<TAB>y<TAB>height<TAB>word`` records into rows of text."""
+    words = []
+    for line in lines:
+        parts = line.split("\t", 3)
+        if len(parts) != 4:
+            continue
+        try:
+            x, y, h = int(parts[0]), int(parts[1]), int(parts[2])
+        except ValueError:
+            continue
+        words.append((y + h / 2.0, x, max(h, 1), parts[3]))
+    rows: list = []
+    for centre, x, h, text in sorted(words):
+        if rows and abs(centre - rows[-1]["centre"]) <= rows[-1]["h"] * 0.6:
+            rows[-1]["words"].append((x, text))
+        else:
+            rows.append({"centre": centre, "h": h, "words": [(x, text)]})
+    return [" ".join(t for _, t in sorted(r["words"])) for r in rows]
+
+
+def _recognise(hwnd: int, timeout: float, words: bool) -> list:
     if not available():
         return []
     tmp = tempfile.mkdtemp(prefix="eda-agent-ocr-")
     png = os.path.join(tmp, "dialog.png")
     script = os.path.join(tmp, "ocr.ps1")
     try:
-        if not capture_png(hwnd, png):
+        if not capture_png(hwnd, png, enlarge=2):
             return []
         with open(script, "w", encoding="utf-8") as handle:
             handle.write(_OCR_PS1)
         proc = subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-             "-File", script, "-Path", png],
-            capture_output=True, text=True, timeout=timeout)
+             "-File", script, "-Path", png] + (["-Words"] if words else []),
+            capture_output=True, text=True, timeout=timeout, **no_window())
         if proc.returncode != 0:
             return []
         return [line.strip() for line in proc.stdout.splitlines()
@@ -177,3 +339,7 @@ def read_window_text(hwnd: int, timeout: float = 30.0) -> list:
             os.rmdir(tmp)
         except OSError:
             pass
+
+
+if __name__ == "__main__":
+    raise SystemExit(_capture_worker(sys.argv[1:]))

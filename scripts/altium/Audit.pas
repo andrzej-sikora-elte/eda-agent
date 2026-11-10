@@ -208,7 +208,7 @@ Begin
         If UpperCase(Doc.DM_DocumentKind) <> 'SCH' Then Continue;
 
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(Doc.DM_FullPath); Except End;
+        SchDoc := ProjectSheet(Doc.DM_FullPath);
         If SchDoc = Nil Then Continue;
 
         SchIter := SchDoc.SchIterator_Create;
@@ -382,7 +382,7 @@ Begin
         SheetPath := '';
         Try SheetPath := Doc.DM_FullPath; Except End;
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
+        SchDoc := ProjectSheet(SheetPath);
         If SchDoc = Nil Then Continue;
 
         SchIter := SchDoc.SchIterator_Create;
@@ -483,7 +483,7 @@ Begin
     Iter := Board.BoardIterator_Create;
     Try
         Iter.AddFilter_ObjectSet(MkSet(eViaObject));
-        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
         Iter.AddFilter_Method(eProcessAll);
         Obj := Iter.FirstPCBObject;
         While Obj <> Nil Do
@@ -752,7 +752,7 @@ Begin
 
     ToleranceMils := StrToFloatDef(ExtractJsonValue(Params, 'tolerance_mils'), 1.0);
     If ToleranceMils < 0.0 Then ToleranceMils := 1.0;
-    Tolerance := MilsToCoord(Round(ToleranceMils));
+    Tolerance := MilsToCoordF(ToleranceMils);
 
     Checked := 0;
     Violations := 0;
@@ -793,7 +793,7 @@ Begin
                 NetName := '';
                 Try NetName := Prim1.Net.Name; Except End;
                 LayerStr := '';
-                Try LayerStr := GetLayerString(Prim1.Layer); Except End;
+                Try LayerStr := LayerDisplayName(Prim1.Layer); Except End;
 
                 { Check both endpoints, EndIdx 1..2.                         }
                 For EndIdx := 1 To 2 Do
@@ -874,8 +874,8 @@ Begin
                             JsonStr('kind', KindStr) + ',' +
                             JsonStr('layer', LayerStr) + ',' +
                             JsonStr('net', NetName) + ',' +
-                            JsonStr('at', '(' + IntToStr(CoordToMils(X)) + ',' +
-                                          IntToStr(CoordToMils(Y)) + ')');
+                            JsonStr('at', '(' + FloatToJsonStr(CoordToMilsF(X)) + ',' +
+                                          FloatToJsonStr(CoordToMilsF(Y)) + ')');
                         ItemsJson := ItemsJson + JsonObj(EntryJson);
                     End;
                 End;
@@ -975,7 +975,7 @@ Begin
 
     RadiusMils := StrToFloatDef(ExtractJsonValue(Params, 'radius_mils'), 50.0);
     If RadiusMils <= 0.0 Then RadiusMils := 50.0;
-    Radius := MilsToCoord(Round(RadiusMils));
+    Radius := MilsToCoordF(RadiusMils);
 
     Checked := 0;
     Violations := 0;
@@ -985,7 +985,7 @@ Begin
     BIter := Board.BoardIterator_Create;
     Try
         BIter.AddFilter_ObjectSet(MkSet(eViaObject));
-        BIter.AddFilter_LayerSet(AllLayers);
+        BIter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
         BIter.AddFilter_Method(eProcessAll);
         Obj1 := BIter.FirstPCBObject;
         While Obj1 <> Nil Do
@@ -1003,7 +1003,7 @@ Begin
                         SpatIter := Board.SpatialIterator_Create;
                         Try
                             SpatIter.AddFilter_ObjectSet(MkSet(eViaObject));
-                            SpatIter.AddFilter_LayerSet(AllLayers);
+                            SpatIter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
                             SpatIter.AddFilter_Area(Via1.x - Radius, Via1.y - Radius,
                                                      Via1.x + Radius, Via1.y + Radius);
                             Obj2 := SpatIter.FirstPCBObject;
@@ -1033,8 +1033,8 @@ Begin
                             First := False;
                             EntryJson :=
                                 JsonStr('net', SignalNet) + ',' +
-                                JsonStr('at', '(' + IntToStr(CoordToMils(Via1.x)) + ',' +
-                                              IntToStr(CoordToMils(Via1.y)) + ')');
+                                JsonStr('at', '(' + FloatToJsonStr(CoordToMilsF(Via1.x)) + ',' +
+                                              FloatToJsonStr(CoordToMilsF(Via1.y)) + ')');
                             ItemsJson := ItemsJson + JsonObj(EntryJson);
                         End;
                     End;
@@ -1120,19 +1120,19 @@ Begin
                     Begin
                         Inc(Violations);
                         LayerStr := '';
-                        Try LayerStr := GetLayerString(Obj.Layer); Except End;
+                        Try LayerStr := LayerDisplayName(Obj.Layer); Except End;
                         BBox.X1 := 0; BBox.Y1 := 0;
                         Try BBox := Obj.BoundingRectangle; Except End;
                         If Not First Then ItemsJson := ItemsJson + ',';
                         First := False;
                         EntryJson :=
                             JsonStr('layer', LayerStr) + ',' +
-                            JsonStr('at', '(' + IntToStr(CoordToMils(BBox.X1)) + ',' +
-                                          IntToStr(CoordToMils(BBox.Y1)) + ')');
+                            JsonStr('at', '(' + FloatToJsonStr(CoordToMilsF(BBox.X1)) + ',' +
+                                          FloatToJsonStr(CoordToMilsF(BBox.Y1)) + ')');
                         ItemsJson := ItemsJson + JsonObj(EntryJson);
                     End;
                 End;
-            Except End;
+            Except { a region that cannot be read is skipped; this only reads } End;
             Obj := Iter.NextPCBObject;
         End;
     Finally
@@ -1468,7 +1468,7 @@ Begin
     BIter := Board.BoardIterator_Create;
     Try
         BIter.AddFilter_ObjectSet(MkSet(eViaObject));
-        BIter.AddFilter_LayerSet(AllLayers);
+        BIter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
         BIter.AddFilter_Method(eProcessAll);
         Obj := BIter.FirstPCBObject;
         While Obj <> Nil Do
@@ -1533,8 +1533,8 @@ Begin
                     First := False;
                     EntryJson :=
                         JsonStr('net', NetName) + ',' +
-                        JsonStr('at', '(' + IntToStr(CoordToMils(Via.x)) + ',' +
-                                      IntToStr(CoordToMils(Via.y)) + ')') + ',' +
+                        JsonStr('at', '(' + FloatToJsonStr(CoordToMilsF(Via.x)) + ',' +
+                                      FloatToJsonStr(CoordToMilsF(Via.y)) + ')') + ',' +
                         JsonInt('connected_layers', Connected);
                     ItemsJson := ItemsJson + JsonObj(EntryJson);
                 End;
@@ -1623,7 +1623,7 @@ Begin
         Try SheetPath := Doc.DM_FileName; Except End;
 
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(Doc.DM_FullPath); Except End;
+        SchDoc := ProjectSheet(Doc.DM_FullPath);
         If SchDoc = Nil Then Continue;
         SchIter := SchDoc.SchIterator_Create;
         If SchIter = Nil Then Continue;
@@ -1775,7 +1775,7 @@ Begin
     Iter := Board.BoardIterator_Create;
     Try
         Iter.AddFilter_ObjectSet(MkSet(ePadObject, eViaObject));
-        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
         Iter.AddFilter_Method(eProcessAll);
         Obj := Iter.FirstPCBObject;
         While Obj <> Nil Do
@@ -1818,7 +1818,7 @@ Begin
                         Begin
                             Inc(Violations);
                             LayerStr := '';
-                            Try LayerStr := GetLayerString(LayerId); Except End;
+                            Try LayerStr := LayerDisplayName(LayerId); Except End;
                             If Not First Then ItemsJson := ItemsJson + ',';
                             First := False;
                             EntryJson :=
@@ -1826,8 +1826,8 @@ Begin
                                 JsonStr('designator', DesStr) + ',' +
                                 JsonStr('net', NetStr) + ',' +
                                 JsonStr('layer', LayerStr) + ',' +
-                                JsonStr('at', '(' + IntToStr(CoordToMils(PadX)) + ',' +
-                                              IntToStr(CoordToMils(PadY)) + ')');
+                                JsonStr('at', '(' + FloatToJsonStr(CoordToMilsF(PadX)) + ',' +
+                                              FloatToJsonStr(CoordToMilsF(PadY)) + ')');
                             ItemsJson := ItemsJson + JsonObj(EntryJson);
                         End;
                     Except End;
@@ -1876,7 +1876,8 @@ Var
     SchObj : ISch_GraphicalObject;
     Comp : ISch_Component;
     Loc : TLocation;
-    I, Checked, Violations, GridMils, XMils, YMils, Dx, Dy : Integer;
+    I, Checked, Violations : Integer;
+    GridMils, XMils, YMils, Dx, Dy : Double;
     GridStr, Designator, SheetName, DocKind, ItemsJson, EntryJson : String;
     First : Boolean;
 Begin
@@ -1894,7 +1895,7 @@ Begin
     End;
 
     GridStr := ExtractJsonValue(Params, 'grid_mils');
-    GridMils := StrToIntDef(GridStr, 100);
+    GridMils := StrToFloatDef(GridStr, 100);
     If GridMils <= 0 Then GridMils := 100;
 
     Checked := 0;
@@ -1914,7 +1915,7 @@ Begin
         Try SheetName := Doc.DM_FileName; Except End;
 
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(Doc.DM_FullPath); Except End;
+        SchDoc := ProjectSheet(Doc.DM_FullPath);
         If SchDoc = Nil Then Continue;
 
         SchIter := SchDoc.SchIterator_Create;
@@ -1928,15 +1929,19 @@ Begin
                     Comp := SchObj;
                     Inc(Checked);
                     Loc := Comp.Location;
-                    XMils := CoordToMils(Loc.X);
-                    YMils := CoordToMils(Loc.Y);
-                    Dx := XMils Mod GridMils;
-                    Dy := YMils Mod GridMils;
-                    { Mod can be negative on Pascal for negative coords; }
-                    { take absolute. Components at negative coords (off }
-                    { sheet origin) get treated symmetrically.            }
-                    If Dx < 0 Then Dx := -Dx;
-                    If Dy < 0 Then Dy := -Dy;
+                    XMils := CoordToMilsF(Loc.X);
+                    YMils := CoordToMilsF(Loc.Y);
+                    { The remainder as Mod gives it (sign of the dividend), }
+                    { in decimal mils: rounding the location to a whole mil }
+                    { first passed a part 0.4 mil off the grid. Taken       }
+                    { absolute, so components at negative coords (off sheet }
+                    { origin) get treated symmetrically. A remainder within }
+                    { half the 1e-4 mil resolution of either grid line is   }
+                    { the division's own error, not an offset.              }
+                    Dx := Abs(XMils - Trunc(XMils / GridMils) * GridMils);
+                    Dy := Abs(YMils - Trunc(YMils / GridMils) * GridMils);
+                    If (Dx < 0.00005) Or (GridMils - Dx < 0.00005) Then Dx := 0;
+                    If (Dy < 0.00005) Or (GridMils - Dy < 0.00005) Then Dy := 0;
                     If (Dx <> 0) Or (Dy <> 0) Then
                     Begin
                         Inc(Violations);
@@ -1947,10 +1952,10 @@ Begin
                         EntryJson :=
                             JsonStr('designator', Designator) + ',' +
                             JsonStr('sheet', SheetName) + ',' +
-                            JsonStr('at', '(' + IntToStr(XMils) + ',' +
-                                          IntToStr(YMils) + ')') + ',' +
-                            JsonInt('dx', Dx) + ',' +
-                            JsonInt('dy', Dy);
+                            JsonStr('at', '(' + FloatToJsonStr(XMils) + ',' +
+                                          FloatToJsonStr(YMils) + ')') + ',' +
+                            JsonFloat('dx', Dx) + ',' +
+                            JsonFloat('dy', Dy);
                         ItemsJson := ItemsJson + JsonObj(EntryJson);
                     End;
                 Except End;
@@ -1965,7 +1970,7 @@ Begin
         JsonObj(
             JsonInt('checked', Checked) + ',' +
             JsonInt('violations', Violations) + ',' +
-            JsonInt('grid_mils', GridMils) + ',' +
+            JsonFloat('grid_mils', GridMils) + ',' +
             JsonRaw('items', '[' + ItemsJson + ']')
         ));
 End;
@@ -2024,7 +2029,7 @@ Begin
     Iter := Board.BoardIterator_Create;
     Try
         Iter.AddFilter_ObjectSet(MkSet(eComponentObject));
-        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
         Iter.AddFilter_Method(eProcessAll);
         Obj := Iter.FirstPCBObject;
         While Obj <> Nil Do
@@ -2040,14 +2045,14 @@ Begin
                     Designator := '';
                     Try Designator := Comp.Name.Text; Except End;
                     LayerStr := '';
-                    Try LayerStr := GetLayerString(Comp.Layer); Except End;
+                    Try LayerStr := LayerDisplayName(Comp.Layer); Except End;
                     If Not First Then ItemsJson := ItemsJson + ',';
                     First := False;
                     EntryJson :=
                         JsonStr('designator', Designator) + ',' +
                         JsonStr('layer', LayerStr) + ',' +
-                        JsonStr('at', '(' + IntToStr(CoordToMils(Comp.x)) + ',' +
-                                      IntToStr(CoordToMils(Comp.y)) + ')');
+                        JsonStr('at', '(' + FloatToJsonStr(CoordToMilsF(Comp.x)) + ',' +
+                                      FloatToJsonStr(CoordToMilsF(Comp.y)) + ')');
                     ItemsJson := ItemsJson + JsonObj(EntryJson);
                 End;
             Except End;
@@ -2234,7 +2239,7 @@ Begin
     Iter := Board.BoardIterator_Create;
     Try
         Iter.AddFilter_ObjectSet(MkSet(ePadObject, eViaObject));
-        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
         Iter.AddFilter_Method(eProcessAll);
         Obj := Iter.FirstPCBObject;
         While Obj <> Nil Do
@@ -2261,8 +2266,8 @@ Begin
                     JsonStr('kind', KindStr) + ',' +
                     JsonStr('designator', DesStr) + ',' +
                     JsonRaw('distance_mils', FloatToJsonStr(Round(Gap * 100) / 100.0)) + ',' +
-                    JsonStr('at', '(' + IntToStr(CoordToMils(Obj.x)) + ',' +
-                                  IntToStr(CoordToMils(Obj.y)) + ')');
+                    JsonStr('at', '(' + FloatToJsonStr(CoordToMilsF(Obj.x)) + ',' +
+                                  FloatToJsonStr(CoordToMilsF(Obj.y)) + ')');
                 ItemsJson := ItemsJson + JsonObj(EntryJson);
             End;
             Obj := Iter.NextPCBObject;
@@ -2340,7 +2345,7 @@ Begin
         If UpperCase(Doc.DM_DocumentKind) <> 'SCH' Then Continue;
 
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(Doc.DM_FullPath); Except End;
+        SchDoc := ProjectSheet(Doc.DM_FullPath);
         If SchDoc = Nil Then Continue;
 
         SchIter := SchDoc.SchIterator_Create;
@@ -2482,7 +2487,7 @@ Begin
         If Doc = Nil Then Continue;
         If UpperCase(Doc.DM_DocumentKind) <> 'SCH' Then Continue;
         SchDoc := Nil;
-        Try SchDoc := SchServer.GetSchDocumentByPath(Doc.DM_FullPath); Except End;
+        SchDoc := ProjectSheet(Doc.DM_FullPath);
         If SchDoc = Nil Then Continue;
 
         SchIter := SchDoc.SchIterator_Create;
@@ -2793,7 +2798,7 @@ Begin
     Iter := Board.BoardIterator_Create;
     Try
         Iter.AddFilter_ObjectSet(MkSet(eComponentObject));
-        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
         Iter.AddFilter_Method(eProcessAll);
 
         Comp := Iter.FirstPCBObject;
@@ -2805,7 +2810,7 @@ Begin
                 If DesigText <> Nil Then
                 Begin
                     Inc(Checked);
-                    DesigLayer := GetLayerString(DesigText.Layer);
+                    DesigLayer := LayerDisplayName(DesigText.Layer);
                     Rot := DesigText.Rotation;
                     OnTop := DesigLayer = 'TopOverlay';
                     { Treat the rotation as discrete 0/90/180/270 even if  }
@@ -2853,7 +2858,7 @@ Begin
         Iter := Board.BoardIterator_Create;
         Try
             Iter.AddFilter_ObjectSet(MkSet(eComponentObject));
-            Iter.AddFilter_LayerSet(AllLayers);
+            Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
             Iter.AddFilter_Method(eProcessAll);
             Comp := Iter.FirstPCBObject;
             While Comp <> Nil Do
@@ -2863,7 +2868,7 @@ Begin
                     Try DesigText := Comp.Name; Except End;
                     If DesigText <> Nil Then
                     Begin
-                        DesigLayer := GetLayerString(DesigText.Layer);
+                        DesigLayer := LayerDisplayName(DesigText.Layer);
                         Rot := DesigText.Rotation;
                         OnTop := DesigLayer = 'TopOverlay';
                         CompName := '';
@@ -2943,7 +2948,7 @@ Var
     Total, Bad : Integer;
     ItemsJson, EntryJson, SheetName : String;
     First : Boolean;
-    LocX, LocY : Integer;
+    LocX, LocY : Double;
     Embedded : Boolean;
 Begin
     Workspace := GetWorkspace;
@@ -2973,7 +2978,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
         SheetName := '';
         Try SheetName := Document.DM_FileName; Except End;
@@ -2995,14 +3000,14 @@ Begin
                         Inc(Bad);
                         LocX := 0;
                         LocY := 0;
-                        Try LocX := CoordToMils(Img.Location.X); Except End;
-                        Try LocY := CoordToMils(Img.Location.Y); Except End;
+                        Try LocX := CoordToMilsF(Img.Location.X); Except End;
+                        Try LocY := CoordToMilsF(Img.Location.Y); Except End;
                         If Not First Then ItemsJson := ItemsJson + ',';
                         First := False;
                         EntryJson :=
                             JsonStr('sheet', SheetName) + ',' +
-                            JsonInt('x_mils', LocX) + ',' +
-                            JsonInt('y_mils', LocY);
+                            JsonFloat('x_mils', LocX) + ',' +
+                            JsonFloat('y_mils', LocY);
                         ItemsJson := ItemsJson + JsonObj(EntryJson);
                     End;
                 Except End;
@@ -3061,7 +3066,7 @@ Begin
     Iter := Board.BoardIterator_Create;
     Try
         Iter.AddFilter_ObjectSet(MkSet(eComponentObject));
-        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
         Iter.AddFilter_Method(eProcessAll);
         Comp := Iter.FirstPCBObject;
         While Comp <> Nil Do
@@ -3131,7 +3136,7 @@ Begin
     Iter := Board.BoardIterator_Create;
     Try
         Iter.AddFilter_ObjectSet(MkSet(eTextObject));
-        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
         Iter.AddFilter_Method(eProcessAll);
         Obj := Iter.FirstPCBObject;
         While Obj <> Nil Do
@@ -3151,7 +3156,7 @@ Begin
                     Inc(Violations);
                     TextStr := '';
                     Try TextStr := Obj.Text; Except End;
-                    LayerName := GetLayerString(LayerVal);
+                    LayerName := LayerDisplayName(LayerVal);
                     If Not First Then ItemsJson := ItemsJson + ',';
                     First := False;
                     EntryJson :=
@@ -3234,7 +3239,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
 
         Iter := Sheet.SchIterator_Create;
@@ -3365,7 +3370,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
         SheetName := '';
         Try SheetName := Document.DM_FileName; Except End;
@@ -3409,8 +3414,8 @@ Begin
                         EntryJson :=
                             JsonStr('label', LabelText) + ',' +
                             JsonStr('sheet', SheetName) + ',' +
-                            JsonInt('x_mils', CoordToMils(LX)) + ',' +
-                            JsonInt('y_mils', CoordToMils(LY));
+                            JsonFloat('x_mils', CoordToMilsF(LX)) + ',' +
+                            JsonFloat('y_mils', CoordToMilsF(LY));
                         ItemsJson := ItemsJson + JsonObj(EntryJson);
                     End;
                 Except End;
@@ -3486,7 +3491,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
         SheetName := '';
         Try SheetName := Document.DM_FileName; Except End;
@@ -3530,8 +3535,8 @@ Begin
                         EntryJson :=
                             JsonStr('net', NetName) + ',' +
                             JsonStr('sheet', SheetName) + ',' +
-                            JsonInt('x_mils', CoordToMils(LX)) + ',' +
-                            JsonInt('y_mils', CoordToMils(LY));
+                            JsonFloat('x_mils', CoordToMilsF(LX)) + ',' +
+                            JsonFloat('y_mils', CoordToMilsF(LY));
                         ItemsJson := ItemsJson + JsonObj(EntryJson);
                     End;
                 Except End;
@@ -3608,7 +3613,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
 
         Iter := Sheet.SchIterator_Create;
@@ -3773,9 +3778,13 @@ Begin
                             Try
                                 Other := Obj;
                                 { Each join is seen from both of its tracks: }
-                                { reported from the lower address only.       }
+                                { reported from the lower address only. The   }
+                                { layer filter above does not hold: tracks on }
+                                { two layers meeting at a via came back, and  }
+                                { they leave no copper wedge.                 }
                                 If (Other.I_ObjectAddress > Track.I_ObjectAddress)
-                                   And (Other.Net = Track.Net) Then
+                                   And (Other.Net = Track.Net)
+                                   And (Other.Layer = Track.Layer) Then
                                 Begin
                                     { Find which of Other's endpoints is at (PX,PY) }
                                     { and build a vector pointing away from it.    }
@@ -3814,14 +3823,14 @@ Begin
                                         Inc(Bad);
                                         NetName := '';
                                         Try If Track.Net <> Nil Then NetName := Track.Net.Name; Except End;
-                                        LayerName := GetLayerString(Track.Layer);
+                                        LayerName := LayerDisplayName(Track.Layer);
                                         If Not First Then ItemsJson := ItemsJson + ',';
                                         First := False;
                                         EntryJson :=
                                             JsonStr('net', NetName) + ',' +
                                             JsonStr('layer', LayerName) + ',' +
-                                            JsonInt('x_mils', CoordToMils(PX)) + ',' +
-                                            JsonInt('y_mils', CoordToMils(PY)) + ',' +
+                                            JsonFloat('x_mils', CoordToMilsF(PX)) + ',' +
+                                            JsonFloat('y_mils', CoordToMilsF(PY)) + ',' +
                                             JsonFloat('angle_deg', ThetaDeg);
                                         ItemsJson := ItemsJson + JsonObj(EntryJson);
                                         If Bad >= 100 Then Break;
@@ -3947,7 +3956,7 @@ Begin
     Iter := Board.BoardIterator_Create;
     Try
         Iter.AddFilter_ObjectSet(MkSet(eNetObject));
-        Iter.AddFilter_LayerSet(AllLayers);
+        Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
         Iter.AddFilter_Method(eProcessAll);
         Net := Iter.FirstPCBObject;
         While Net <> Nil Do
@@ -3967,11 +3976,11 @@ Begin
                         First := False;
                         Entry :=
                             JsonStr('net', NetName) + ',' +
-                            JsonFloat('min_width_mils', CoordToMils(MinW)) + ',' +
-                            JsonFloat('max_width_mils', CoordToMils(MaxW)) + ',' +
+                            JsonFloat('min_width_mils', CoordToMilsF(MinW)) + ',' +
+                            JsonFloat('max_width_mils', CoordToMilsF(MaxW)) + ',' +
                             JsonFloat('ratio', Ratio) + ',' +
-                            JsonInt('thin_x_mils', CoordToMils(TX)) + ',' +
-                            JsonInt('thin_y_mils', CoordToMils(TY));
+                            JsonFloat('thin_x_mils', CoordToMilsF(TX)) + ',' +
+                            JsonFloat('thin_y_mils', CoordToMilsF(TY));
                         Items := Items + JsonObj(Entry);
                     End;
                 End;
@@ -4062,7 +4071,7 @@ Begin
     BIter := Board.BoardIterator_Create;
     Try
         BIter.AddFilter_ObjectSet(MkSet(ePadObject));
-        BIter.AddFilter_LayerSet(AllLayers);
+        BIter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
         BIter.AddFilter_Method(eProcessAll);
         Obj := BIter.FirstPCBObject;
         While Obj <> Nil Do
@@ -4149,7 +4158,7 @@ Begin
                                 Begin
                                     Inc(Violations);
                                     LayerStr := '';
-                                    Try LayerStr := GetLayerString(LayerId); Except End;
+                                    Try LayerStr := LayerDisplayName(LayerId); Except End;
                                     If Not First Then ItemsJson := ItemsJson + ',';
                                     First := False;
                                     EntryJson :=
@@ -4157,12 +4166,12 @@ Begin
                                         JsonStr('pin', PinStr) + ',' +
                                         JsonStr('net', NetStr) + ',' +
                                         JsonStr('layer', LayerStr) + ',' +
-                                        JsonStr('at', '(' + IntToStr(CoordToMils(PadX)) + ',' +
-                                                      IntToStr(CoordToMils(PadY)) + ')');
+                                        JsonStr('at', '(' + FloatToJsonStr(CoordToMilsF(PadX)) + ',' +
+                                                      FloatToJsonStr(CoordToMilsF(PadY)) + ')');
                                     ItemsJson := ItemsJson + JsonObj(EntryJson);
                                 End;
                             End;
-                        Except End;
+                        Except { a layer that cannot be read is skipped; this only reads } End;
                         Layer := Stack.NextLayer(Layer);
                     End;
                 End
@@ -4211,7 +4220,7 @@ Begin
                     Begin
                         Inc(Violations);
                         LayerStr := '';
-                        Try LayerStr := GetLayerString(PadLayer); Except End;
+                        Try LayerStr := LayerDisplayName(PadLayer); Except End;
                         If Not First Then ItemsJson := ItemsJson + ',';
                         First := False;
                         EntryJson :=
@@ -4219,8 +4228,8 @@ Begin
                             JsonStr('pin', PinStr) + ',' +
                             JsonStr('net', NetStr) + ',' +
                             JsonStr('layer', LayerStr) + ',' +
-                            JsonStr('at', '(' + IntToStr(CoordToMils(PadX)) + ',' +
-                                          IntToStr(CoordToMils(PadY)) + ')');
+                            JsonStr('at', '(' + FloatToJsonStr(CoordToMilsF(PadX)) + ',' +
+                                          FloatToJsonStr(CoordToMilsF(PadY)) + ')');
                         ItemsJson := ItemsJson + JsonObj(EntryJson);
                     End;
                 End;
@@ -4318,7 +4327,7 @@ Begin
         Try DocKind := Document.DM_DocumentKind; Except End;
         If DocKind <> 'SCH' Then Continue;
         Sheet := Nil;
-        Try Sheet := SchServer.GetSchDocumentByPath(Document.DM_FullPath); Except End;
+        Sheet := ProjectSheet(Document.DM_FullPath);
         If Sheet = Nil Then Continue;
         SheetName := '';
         Try SheetName := Document.DM_FileName; Except End;
@@ -4389,8 +4398,8 @@ Begin
                             JsonStr('label', LabelText) + ',' +
                             JsonStr('conflicts_with', OtherText) + ',' +
                             JsonStr('sheet', SheetName) + ',' +
-                            JsonInt('x_mils', CoordToMils(LX)) + ',' +
-                            JsonInt('y_mils', CoordToMils(LY));
+                            JsonFloat('x_mils', CoordToMilsF(LX)) + ',' +
+                            JsonFloat('y_mils', CoordToMilsF(LY));
                         ConfJson := ConfJson + JsonObj(EntryJson);
                     End;
 
@@ -4402,8 +4411,8 @@ Begin
                         EntryJson :=
                             JsonStr('label', LabelText) + ',' +
                             JsonStr('sheet', SheetName) + ',' +
-                            JsonInt('x_mils', CoordToMils(LX)) + ',' +
-                            JsonInt('y_mils', CoordToMils(LY));
+                            JsonFloat('x_mils', CoordToMilsF(LX)) + ',' +
+                            JsonFloat('y_mils', CoordToMilsF(LY));
                         DupJson := DupJson + JsonObj(EntryJson);
                     End;
 
@@ -4464,10 +4473,10 @@ Begin
                             JsonStr('label', LabelText) + ',' +
                             JsonStr('pin', PinDesig) + ',' +
                             JsonStr('sheet', SheetName) + ',' +
-                            JsonInt('x_mils', CoordToMils(LX)) + ',' +
-                            JsonInt('y_mils', CoordToMils(LY)) + ',' +
-                            JsonInt('connect_x_mils', CoordToMils(CX)) + ',' +
-                            JsonInt('connect_y_mils', CoordToMils(CY));
+                            JsonFloat('x_mils', CoordToMilsF(LX)) + ',' +
+                            JsonFloat('y_mils', CoordToMilsF(LY)) + ',' +
+                            JsonFloat('connect_x_mils', CoordToMilsF(CX)) + ',' +
+                            JsonFloat('connect_y_mils', CoordToMilsF(CY));
                         RootJson := RootJson + JsonObj(EntryJson);
                     End;
                 Except End;
@@ -4488,6 +4497,219 @@ Begin
             JsonRaw('labels_on_pin_root', '[' + RootJson + ']') + ',' +
             JsonRaw('duplicate_labels', '[' + DupJson + ']')
         ));
+End;
+
+
+{ Audit_FindStaleReadPaths                                                    }
+{                                                                              }
+{ A write that reports success can leave a read path behind: the getters show }
+{ the new state while another way of finding the object still answers from   }
+{ the old one (#208: a via's mask moved its box, its spatial index entry     }
+{ stayed, and a search by the new box found nothing). This walks the board  }
+{ and asks each read path for every object:                                   }
+{   index   the spatial index hands the object out where it is, at the      }
+{           centre of its bounding box (searches by area, the online DRC,    }
+{           pours and picking go through it). An object it holds there but  }
+{           not at the corners of the box the getters report is counted as  }
+{           index_box, not as stale: Altium indexes a via whose mask comes  }
+{           from the rules by a narrower box (BoardIndexState);              }
+{   net     an object that reports a net is in that net's own list           }
+{           (connectivity, the ratsnest and pours walk the list; poured      }
+{           copper is not in it and is not asked);                           }
+{   counts  per primitive type (the spatial iterator never hands out group }
+{           objects: components and polygons), the index over the board     }
+{           holds as many objects as the board walk: more means an entry    }
+{           left for a deleted object, fewer an object never indexed.       }
+
+Function StaleTypeId(T : Integer) : Integer;
+Begin
+    Case T Of
+        0 : Result := eTrackObject;
+        1 : Result := eArcObject;
+        2 : Result := eViaObject;
+        3 : Result := ePadObject;
+        4 : Result := eFillObject;
+        5 : Result := eRegionObject;
+        6 : Result := eTextObject;
+    Else
+        Result := eComponentBodyObject;
+    End;
+End;
+
+Function StaleTypeWanted(Types : String; Name : String) : Boolean;
+Begin
+    Result := (Types = '') Or (Pos(',' + Name + ',', ',' + Types + ',') > 0);
+End;
+
+Function Audit_FindStaleReadPaths(Params, RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Iter : IPCB_BoardIterator;
+    Spatial : IPCB_SpatialIterator;
+    NetIter : IPCB_BoardIterator;
+    Group : IPCB_GroupIterator;
+    Obj, Member : IPCB_Primitive;
+    Net : IPCB_Net;
+    Members : TStringList;
+    BR : TCoordRect;
+    T, TypeId, State, Narrow, Limit, Checked, StaleIdx, StaleNet, Mismatch, Walked, Indexed, Shown : Integer;
+    Types, Name, ItemsJson, CountsJson, Response, NetName, Owner : String;
+    Lo, Hi : TCoord;
+Begin
+    Board := ResolvePCBBoard(ExtractJsonValue(Params, 'board_path'));
+    If Board = Nil Then
+    Begin
+        Response := BuildErrorResponse(RequestId, 'NO_BOARD',
+            'No board open at that path, and none focused');
+        Result := Response;
+        Exit;
+    End;
+    Types := LowerCase(ExtractJsonValue(Params, 'types'));
+    Limit := StrToIntDef(ExtractJsonValue(Params, 'limit'), 100);
+
+    { Every primitive any net lists. }
+    Members := TStringList.Create;
+    Members.Sorted := True;
+    NetIter := Board.BoardIterator_Create;
+    Try
+        NetIter.AddFilter_ObjectSet(MkSet(eNetObject));
+        NetIter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+        NetIter.AddFilter_Method(eProcessAll);
+        Net := NetIter.FirstPCBObject;
+        While Net <> Nil Do
+        Begin
+            Group := Net.GroupIterator_Create;
+            Try
+                Group.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject,
+                    ePadObject, eFillObject, eRegionObject, eTextObject,
+                    eComponentBodyObject));
+                Member := Group.FirstPCBObject;
+                While Member <> Nil Do
+                Begin
+                    Members.Add(IntToStr(Member.I_ObjectAddress));
+                    Member := Group.NextPCBObject;
+                End;
+            Finally
+                Net.GroupIterator_Destroy(Group);
+            End;
+            Net := NetIter.NextPCBObject;
+        End;
+    Finally
+        Board.BoardIterator_Destroy(NetIter);
+    End;
+
+    Checked := 0; Narrow := 0; StaleIdx := 0; StaleNet := 0; Mismatch := 0; Shown := 0;
+    ItemsJson := ''; CountsJson := '';
+    Lo := MilsToCoordF(-200000);
+    Hi := MilsToCoordF(200000);
+    Try
+        For T := 0 To 7 Do
+        Begin
+            TypeId := StaleTypeId(T);
+            Name := ObjectIDToObjectName(TypeId);
+            If Not StaleTypeWanted(Types, Name) Then Continue;
+            Walked := 0;
+            Iter := Board.BoardIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(TypeId));
+                Iter.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+                Iter.AddFilter_Method(eProcessAll);
+                Obj := Iter.FirstPCBObject;
+                While Obj <> Nil Do
+                Begin
+                    Inc(Walked);
+                    Inc(Checked);
+                    State := BoardIndexState(Board, Obj);
+                    If State = 1 Then Inc(Narrow);
+                    If (State And 1) = 0 Then
+                    Begin
+                        Inc(StaleIdx);
+                        If Shown < Limit Then
+                        Begin
+                            BR := Obj.BoundingRectangle;
+                            Owner := '';
+                            If Obj.InComponent Then Owner := 'component'
+                            Else If Obj.InPolygon Then Owner := 'polygon'
+                            Else If Obj.InDimension Then Owner := 'dimension';
+                            If ItemsJson <> '' Then ItemsJson := ItemsJson + ',';
+                            ItemsJson := ItemsJson + JsonObj(
+                                JsonStr('read_path', 'index') + ','
+                                + JsonStr('type', Name) + ','
+                                + JsonStr('layer', LayerDisplayName(Obj.Layer)) + ','
+                                + JsonStr('owner', Owner) + ','
+                                + JsonFloat('left', CoordToMilsF(BR.Left)) + ','
+                                + JsonFloat('bottom', CoordToMilsF(BR.Bottom)) + ','
+                                + JsonFloat('right', CoordToMilsF(BR.Right)) + ','
+                                + JsonFloat('top', CoordToMilsF(BR.Top)));
+                            Inc(Shown);
+                        End;
+                    End;
+                    Net := Nil;
+                    If Not Obj.InPolygon Then Net := Obj.Net;
+                    If Net <> Nil Then
+                    Begin
+                        If Members.IndexOf(IntToStr(Obj.I_ObjectAddress)) < 0 Then
+                        Begin
+                            Inc(StaleNet);
+                            If Shown < Limit Then
+                            Begin
+                                BR := Obj.BoundingRectangle;
+                                NetName := '';
+                                Try NetName := Net.Name; Except End;
+                                If ItemsJson <> '' Then ItemsJson := ItemsJson + ',';
+                                ItemsJson := ItemsJson + JsonObj(
+                                    JsonStr('read_path', 'net') + ','
+                                    + JsonStr('type', Name) + ','
+                                    + JsonStr('net', NetName) + ','
+                                    + JsonStr('layer', LayerDisplayName(Obj.Layer)) + ','
+                                    + JsonFloat('left', CoordToMilsF(BR.Left)) + ','
+                                    + JsonFloat('bottom', CoordToMilsF(BR.Bottom)));
+                                Inc(Shown);
+                            End;
+                        End;
+                    End;
+                    Obj := Iter.NextPCBObject;
+                End;
+            Finally
+                Board.BoardIterator_Destroy(Iter);
+            End;
+
+            Indexed := 0;
+            Spatial := Board.SpatialIterator_Create;
+            Try
+                Spatial.AddFilter_ObjectSet(MkSet(TypeId));
+                Spatial.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+                Spatial.AddFilter_Area(Lo, Lo, Hi, Hi);
+                Obj := Spatial.FirstPCBObject;
+                While Obj <> Nil Do
+                Begin
+                    Inc(Indexed);
+                    Obj := Spatial.NextPCBObject;
+                End;
+            Finally
+                Board.SpatialIterator_Destroy(Spatial);
+            End;
+            If Indexed <> Walked Then Inc(Mismatch);
+            If CountsJson <> '' Then CountsJson := CountsJson + ',';
+            CountsJson := CountsJson + JsonObj(JsonStr('type', Name) + ','
+                + JsonInt('board', Walked) + ',' + JsonInt('index', Indexed));
+        End;
+    Finally
+        Members.Free;
+    End;
+
+    Response := BuildSuccessResponse(RequestId,
+        JsonObj(
+            JsonInt('checked', Checked) + ',' +
+            JsonInt('violations', StaleIdx + StaleNet + Mismatch) + ',' +
+            JsonInt('stale_index', StaleIdx) + ',' +
+            JsonInt('count_mismatches', Mismatch) + ',' +
+            JsonInt('index_box', Narrow) + ',' +
+            JsonInt('stale_net', StaleNet) + ',' +
+            JsonRaw('counts', '[' + CountsJson + ']') + ',' +
+            JsonRaw('items', '[' + ItemsJson + ']')
+        ));
+    Result := Response;
 End;
 
 
@@ -4554,6 +4776,8 @@ Begin
         Result := Audit_FindInconsistentTrackWidths(Params, RequestId)
     Else If Action = 'find_pads_center_not_connected' Then
         Result := Audit_FindPadsCenterNotConnected(Params, RequestId)
+    Else If Action = 'find_stale_read_paths' Then
+        Result := Audit_FindStaleReadPaths(Params, RequestId)
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_COMMAND',
             'Unknown audit action: ' + Action);

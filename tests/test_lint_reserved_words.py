@@ -49,7 +49,9 @@ def test_reserved_set_matches_memory(lint):
         "Label", "Type", "Class", "Object", "Record", "Array", "Set",
         "String", "File", "Unit", "Function", "Procedure", "Const", "Var",
         "End", "Begin", "If", "Then", "Else", "Goto", "With", "In", "Is",
-        "As", "Of", "Out", "Index",
+        "As", "Of", "Out", "Index", "Reference",
+        # Not a keyword: as a local name it stopped PCB.pas loading (AD 26.11).
+        "DrcOn",
     }
     missing = expected - lint.RESERVED_AS_NAME
     extra = lint.RESERVED_AS_NAME - expected

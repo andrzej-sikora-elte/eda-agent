@@ -2,13 +2,19 @@
 # Copyright (c) 2026 George Saliba <george.saliba@salitronic.com>
 """Application-level tools for Altium Designer MCP Server."""
 
+import functools
+import os
 import re
+import sys
+import unicodedata
 from typing import Any, Optional
 from .. import __version__ as _mcp_server_version
 from ..bridge import get_bridge, AltiumNotRunningError
+from ..bridge.exceptions import AltiumCommandError
 from ..cli import get_bundled_scripts_path
 from .datasheet_hints import DATASHEET_RULES
 from ..atomicfile import replace_with_retry
+from .. import updates
 
 
 _VERSION_RE = re.compile(r"SCRIPT_VERSION\s*=\s*'([^']+)'")
@@ -39,6 +45,67 @@ _SESSION_REMINDER = {
     "datasheet_rules": DATASHEET_RULES,
 }
 
+# The reminder is about 750 tokens. app_ping and app_attach carry it on
+# their first call in this server and then on every Nth call between
+# them, so a long session still sees it now and then without paying for
+# it on every health check. EDA_AGENT_REMINDER_EVERY sets N; 1 sends it
+# every time.
+_REMINDER_EVERY_ENV = "EDA_AGENT_REMINDER_EVERY"
+_REMINDER_EVERY_DEFAULT = 10
+_reminder_calls = 0
+
+
+def _reminder_every() -> int:
+    raw = (os.environ.get(_REMINDER_EVERY_ENV) or "").strip()
+    try:
+        every = int(raw) if raw else _REMINDER_EVERY_DEFAULT
+    except ValueError:
+        every = _REMINDER_EVERY_DEFAULT
+    return max(every, 1)
+
+
+def _with_session_reminder(reply: dict[str, Any]) -> dict[str, Any]:
+    """Add ``_system_reminder`` to ``reply`` when this call is due one."""
+    global _reminder_calls
+    _reminder_calls += 1
+    if (_reminder_calls - 1) % _reminder_every() == 0:
+        reply["_system_reminder"] = _SESSION_REMINDER
+    return reply
+
+
+def _reports_update(fn):
+    """Add ``update`` to a reply when the daily check found a newer
+    eda-agent, so a session hears of it from the tools it calls first.
+    Read from the last check only; never waits on the network."""
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        reply = await fn(*args, **kwargs)
+        try:
+            news = updates.notice()
+        except Exception:  # noqa: BLE001  news never breaks a ping
+            news = None
+        if news and isinstance(reply, dict):
+            reply["update"] = news
+        return reply
+    return wrapper
+
+
+def _screen_capture_warning() -> Optional[str]:
+    """Say which Python lacks the screen capture packages, when one does:
+    a server started from another Python than the one updated reads the
+    screen through nothing, and app_screenshot is the first to find out."""
+    if os.name != "nt":
+        return None
+    try:
+        from ..ui import ocr
+        if ocr.available():
+            return None
+    except Exception:  # noqa: BLE001  a warning never breaks a ping
+        pass
+    return (f"screen capture is off: pywin32 or Pillow is missing from the "
+            f"Python that runs this server ({sys.executable}). Install them "
+            f"with: \"{sys.executable}\" -m pip install pywin32 Pillow")
+
 
 def _bundled_script_version() -> Optional[str]:
     """Read SCRIPT_VERSION from the bundled Main.pas.
@@ -55,7 +122,7 @@ def _bundled_script_version() -> Optional[str]:
     try:
         main_pas = get_bundled_scripts_path() / "Main.pas"
         text = main_pas.read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    except OSError:  # no bundle to compare against; see the docstring
         return None
     m = _VERSION_RE.search(text)
     return m.group(1) if m else None
@@ -63,10 +130,7 @@ def _bundled_script_version() -> Optional[str]:
 
 def _bundled_script_path() -> Optional[str]:
     """The Main.pas that _bundled_script_version reads, as a string."""
-    try:
-        return str(get_bundled_scripts_path() / "Main.pas")
-    except Exception:
-        return None
+    return str(get_bundled_scripts_path() / "Main.pas")
 
 
 def _folder_of(file_path: str) -> str:
@@ -150,6 +214,15 @@ def _unit_stamp_check(bridge: Any, loaded: Any) -> tuple[dict, list[str]]:
             "unstamped_units": unstamped, "stamps_compared_with": str(folder)}, warnings
 
 
+def _server_workspace_dir() -> str:
+    """The folder this server writes its requests to, or '' unknown."""
+    try:
+        from ..config import get_config
+        return str(get_config().workspace_dir)
+    except Exception:                              # noqa: BLE001
+        return ""
+
+
 def _other_servers() -> tuple[list, Optional[str]]:
     """Other eda-agent servers on this workspace, and the warning for them."""
     from .. import server_registry
@@ -186,7 +259,7 @@ def register_meta_tools(mcp):
         Filters (all optional, AND-combined):
             category: core, application, project, library, generic,
                 schematic, pcb, audit, design, simulation, routing, meta,
-                parts (and kicad on the KiCad backend). "core" is the
+                parts, altium365 (and kicad on the KiCad backend). "core" is the
                 EDA-agnostic main flow and the usual start. No filter
                 returns the live ``categories`` map.
             maturity: ``offline`` (no Altium), ``simulator`` or
@@ -207,12 +280,20 @@ def register_meta_tools(mcp):
 
         _SCHEMA_CAP = 40
 
-        tools = await mcp.list_tools()
+        from .folds import reach_of
+
+        tools = list(await mcp.list_tools())
+        # Members of a family tool and single-item tools are not
+        # advertised; they are listed with how to reach them.
+        tools += list((getattr(mcp, "hidden", {}) or {}).values())
         q = query.lower().strip()
         out = []
         cat_counts: dict[str, int] = {}
         for t in tools:
             md = tool_metadata(t.name)
+            reach = reach_of(t.name)
+            if reach:
+                md = dict(md, reach=reach)
             if category and md["category"] != category:
                 continue
             if maturity and md["maturity"] != maturity:
@@ -277,12 +358,14 @@ def register_meta_tools(mcp):
         import json as _json
 
         tools = await mcp.list_tools()
-        known = {t.name for t in tools}
+        known = {t.name for t in tools} | set(getattr(mcp, "hidden", {}) or {})
         if name not in known:
             return {"error": f"unknown tool: {name}"}
         # Prevent self-recursion; tool_catalog is fine to invoke.
         if name == "tool_invoke":
             return {"error": "tool_invoke cannot invoke itself"}
+        from ..bridge.altium_bridge import name_tool_call
+        name_tool_call(name)
         try:
             result = await mcp.call_tool(name, arguments or {})
         except Exception as e:  # noqa: BLE001 - surface as data, not a crash
@@ -291,14 +374,166 @@ def register_meta_tools(mcp):
         content = result[0] if isinstance(result, tuple) else result
         if isinstance(content, list) and content and hasattr(content[0], "text"):
             try:
-                return {"tool": name, "result": _json.loads(content[0].text)}
+                out = {"tool": name, "result": _json.loads(content[0].text)}
             except (ValueError, TypeError):
-                return {"tool": name, "result": content[0].text}
-        return {"tool": name, "result": content}
+                out = {"tool": name, "result": content[0].text}
+        else:
+            out = {"tool": name, "result": content}
+        from .folds import FOLDED_BATCH
+        if name in FOLDED_BATCH:
+            out["note"] = (f"{name} is now {FOLDED_BATCH[name]}(items=[...]), "
+                           "which runs the same handler")
+        return out
+
+
+async def _run_declared_menu(bridge, menu_path: str) -> dict:
+    """Run a menu path through the command Altium's menu files give it.
+
+    The focused document picks the menu bar, because "Tools|Teardrops"
+    exists on a board and not on a schematic.
+    """
+    import asyncio
+
+    from ..safety import refuse_process
+    from ..ui import altium_menus
+
+    active = await bridge.send_command_async(
+        "application.get_active_document", {})
+    editor = str((active or {}).get("document_kind") or "").upper() \
+        if isinstance(active, dict) else ""
+    loop = asyncio.get_running_loop()
+    item = await loop.run_in_executor(
+        None, altium_menus.resolve, menu_path, editor)
+    if item is None:
+        near = await loop.run_in_executor(
+            None, lambda: altium_menus.nearest(menu_path, editor, 8))
+        return {"success": False, "dispatched": False,
+                "error": "UNMAPPED_MENU_PATH", "menu_path": menu_path,
+                "editor": editor or None,
+                "reason": (f"{menu_path!r} is not in the "
+                           f"{editor or 'focused'} editor's menus as Altium "
+                           f"declares them"),
+                "nearest": near}
+    refusal = refuse_process(item.command)
+    if refusal is not None:
+        return {"success": False, "dispatched": False,
+                "error": "REFUSED_BY_POLICY", "reason": refusal,
+                "menu_path": "|".join(item.path), "command": item.command}
+    params = "|".join(p.strip() for p in item.params.split("|") if p.strip())
+    params = "|".join("=".join(s.strip() for s in p.split("=", 1))
+                      for p in params.split("|") if p)
+    result = await bridge.send_command_async(
+        "generic.run_process", {"process": item.command, "params": params})
+    out = {"success": True, "dispatched": True, "outcome_verified": False,
+           "menu_path": "|".join(item.path), "editor": editor,
+           "command": item.command, "params": params,
+           "shortcut": item.shortcut or None,
+           "note": ("run through the command behind the menu item, with no "
+                    "menu walk; Altium does not report whether a process "
+                    "did anything, so read the result back")}
+    if isinstance(result, dict):
+        out["bridge"] = result
+    return out
+
+
+# The bridge request reaches the scripts as 8-bit text: a character above
+# U+00FF (the ohm sign, the Greek mu, the Unicode minus) arrives as "?".
+# The value engine reads these as R, u and -, so they are folded here.
+_VALUE_GROUPING = "    "
+_VALUE_FOLD = {"Ω": "R", "Ω": "R", "μ": "u", "µ": "u",
+               "−": "-", chr(0x2013): "-", "°": "", "º": ""}
+
+
+def fold_value_text(text: str) -> str:
+    """A value string folded to what the scripts can receive (ASCII for the
+    symbols the value engine knows). Grouping spaces go BEFORE NFKC, which
+    would turn them into plain spaces, and a plain space ends a value."""
+    t = text or ""
+    for ch in _VALUE_GROUPING:
+        t = t.replace(ch, "")
+    t = unicodedata.normalize("NFKC", t)
+    return "".join(_VALUE_FOLD.get(ch, ch) for ch in t)
+
+
+# SI form of a value, per kind: the prefixes the value engine allows for
+# it (largest first), and whether the unit is always written. Resistors take
+# no milli or micro (the engine writes 0R005), capacitors no milli, volts and
+# amperes no kilo, so the SI form keeps to the same letters.
+_SI_PREFIXES = {
+    "ohm": (("G", 9), ("M", 6), ("k", 3), ("", 0)),
+    "farad": (("", 0), ("u", -6), ("n", -9), ("p", -12)),
+    "henry": (("", 0), ("m", -3), ("u", -6), ("n", -9)),
+    "volt": (("", 0), ("m", -3), ("u", -6), ("n", -9)),
+    "ampere": (("", 0), ("m", -3), ("u", -6), ("n", -9)),
+    "percent": (("", 0),),
+    "ppm": (("", 0),),
+    "celsius": (("", 0),),
+}
+_SI_UNIT = {"ohm": "", "farad": "F", "henry": "H", "volt": "V", "ampere": "A",
+            "percent": "%", "ppm": "ppm", "celsius": "C"}
+_SI_UNIT_ALWAYS = ("volt", "ampere", "percent", "ppm", "celsius")
+_KIND_ALIASES = {"r": "ohm", "c": "farad", "l": "henry", "v": "volt",
+                 "a": "ampere", "%": "percent"}
+
+
+def si_value_text(value: str, kind: str, with_unit: bool) -> Optional[str]:
+    """``value`` (an exact decimal in the base unit) written with a decimal
+    point and an SI prefix, or None for a kind it does not know. Exact: the
+    digits are moved, never rounded. Resistors never carry a unit; volts,
+    amperes, %, ppm and degrees C always do, farads and henries only
+    ``with_unit``."""
+    from decimal import Decimal, InvalidOperation, localcontext
+    k = _KIND_ALIASES.get((kind or "").strip().lower(), (kind or "").strip().lower())
+    if k not in _SI_PREFIXES:
+        return None
+    try:
+        d = Decimal(str(value).strip())
+    except InvalidOperation:
+        return None
+    letter, power = _SI_PREFIXES[k][-1]
+    for cand, p in _SI_PREFIXES[k]:
+        if d == 0 or abs(d) >= Decimal(1).scaleb(p):
+            letter, power = cand, p
+            break
+    # Enough digits for any value: the default 28 would round a long one.
+    with localcontext() as ctx:
+        ctx.prec = len(d.as_tuple().digits) + 30
+        mantissa = format(d.scaleb(-power).normalize(), "f")
+    unit = _SI_UNIT[k] if (k in _SI_UNIT_ALWAYS or with_unit) else ""
+    return f"{mantissa}{letter}{unit}"
 
 
 def register_application_tools(mcp):
     """Register application tools with the MCP server."""
+
+    @mcp.tool()
+    async def app_find_menu_command(query: str, editor: str = "",
+                                    limit: int = 20) -> dict[str, Any]:
+        """Search every Altium menu item and the command behind it.
+
+        Read from Altium's own menu definitions in its install, so it
+        answers without Altium's window, in any language Altium ships
+        (words may be English, 中文, 日本語, Deutsch, ...). Each hit gives
+        the menu ``path`` (English), the ``command`` and ``params`` it
+        runs, and its ``shortcut``. Run one with ``app_run_menu`` (no
+        menu walk) or ``app_click_menu`` (the real menu).
+
+        Args:
+            query: words to find, all of which must match.
+            editor: PCB, SCH, PCBLIB or SCHLIB; empty searches all four.
+            limit: how many hits to return.
+        """
+        import asyncio
+
+        from ..ui import altium_locale, altium_menus
+
+        loop = asyncio.get_running_loop()
+        hits = await loop.run_in_executor(
+            None, lambda: altium_menus.search(query, editor, limit))
+        install = altium_locale.install_dir()
+        return {"success": True, "query": query, "editor": editor or None,
+                "count": len(hits), "hits": hits,
+                "install": str(install) if install else None}
 
     @mcp.tool()
     async def app_get_status() -> dict[str, Any]:
@@ -334,6 +569,7 @@ def register_application_tools(mcp):
         return status
 
     @mcp.tool()
+    @_reports_update
     async def app_context() -> dict[str, Any]:
         """Where you are, in one call. Run this before anything else.
 
@@ -442,21 +678,19 @@ def register_application_tools(mcp):
         try:
             bridge.attach()
             script_loaded = bridge.ping()
-            return {
+            return _with_session_reminder({
                 "attached": True,
                 "script_loaded": script_loaded,
                 "message": "Connected to Altium Designer, script is responding"
                 if script_loaded
                 else "Altium is running but script is not responding. Run StartMCPServer in Altium_API.PrjScr.",
-                "_system_reminder": _SESSION_REMINDER,
-            }
+            })
         except AltiumNotRunningError as e:
-            return {
+            return _with_session_reminder({
                 "attached": False,
                 "script_loaded": False,
                 "message": str(e),
-                "_system_reminder": _SESSION_REMINDER,
-            }
+            })
 
     @mcp.tool()
     async def app_save_all() -> dict[str, Any]:
@@ -574,10 +808,15 @@ def register_application_tools(mcp):
             discard_changes: close it even when it reads modified, and
                 LOSE the unsaved edits: the modified flag is cleared first
                 so no save prompt appears. For scratch copies and documents
-                Altium changed by merely opening them, never for work.
+                Altium changed by merely opening them, never for work. A
+                schematic an open project lists may keep the edit in the
+                project after its tab closes: ``discarded`` is then false
+                and ``project_may_hold_edit`` true; proj_close with
+                save=False drops it.
 
         Returns:
-            ``{"closed": bool, "discarded": bool, "file_path": ...}``; an
+            ``{"closed": bool, "discarded": bool, "project_may_hold_edit":
+            bool, "file_path": ...}``; an
             error when the path is not open, or when the document reads
             modified and ``discard_changes`` is not set.
         """
@@ -587,9 +826,24 @@ def register_application_tools(mcp):
         return await get_bridge().send_command_async(
             "application.close_document", params, timeout=120.0)
 
+    async def _other_open_projects(besides: str) -> list[str]:
+        """Projects open in Altium other than ``besides``; empty when the
+        list cannot be read, since it only informs the reply."""
+        import os
+        try:
+            reply = await get_bridge().send_command_async("project.get_open_projects", {})
+        except Exception:  # noqa: BLE001
+            return []
+        rows = reply.get("projects", []) if isinstance(reply, dict) else []
+        kinds = (".prjpcb", ".prjscr", ".libpkg", ".prjmbd")
+        return [path for path in (str(r.get("project_path", "")) for r in rows)
+                if path.lower().endswith(kinds)
+                and os.path.normcase(path) != os.path.normcase(besides)]
+
     @mcp.tool()
-    async def app_checkpoint(label: str = "", save_first: bool = True) -> dict[str, Any]:
-        """Snapshot the focused project so the session is revertible.
+    async def app_checkpoint(label: str = "", save_first: bool = True,
+                             project_path: str = "") -> dict[str, Any]:
+        """Snapshot a project so the session can be rolled back.
 
         Copies the project's design files into a content-addressed store under
         the workspace (unchanged files are deduplicated, so repeat checkpoints
@@ -601,21 +855,42 @@ def register_application_tools(mcp):
             label: optional human note ("before routing pass").
             save_first: flush dirty Altium docs to disk before snapshotting
                 so the checkpoint reflects in-editor changes (default True).
+            project_path: the .PrjPcb to snapshot. Left empty, the focused
+                project is taken; with several open that may not be the one
+                you are editing, so the reply names it and lists the rest.
 
         Returns:
-            The checkpoint manifest summary (id, created, file_count, ...).
+            The checkpoint manifest summary (id, created, file_count, ...),
+            ``project`` (the one snapshotted) and ``other_open_projects``.
             With ``save_first``, also ``saved``: True when the flush
             worked, False with ``save_error`` and a ``note`` when it did
             not. A checkpoint is still taken either way, but one taken
             after a failed save holds the on-disk state only, which is
             missing precisely the in-editor work you were protecting.
         """
+        import os
         saved: Optional[bool] = None
         save_error = ""
+        if not project_path:
+            project_dir, project_file, err = await _resolve_project_dir()
+            if err:
+                return err
+        elif os.path.isfile(project_path):
+            project_dir, project_file = os.path.split(project_path)
+        else:
+            return {"error": f"no project file at {project_path}", "checkpoint": None}
+        snapshot_of = os.path.join(project_dir or "", project_file or "")
+        others = await _other_open_projects(snapshot_of)
         if save_first:
+            # THE PROJECT BEING CHECKPOINTED, not the workspace. save_all
+            # wrote every open document, other projects' included, to
+            # snapshot one (issue #94 reports unrelated sheets rewritten).
+            # Both this and the path lookup above take the focused project.
             try:
                 await get_bridge().send_command_async(
-                    "application.save_all", timeout=60.0
+                    "project.save",
+                    {"project_path": project_path} if project_path else {},
+                    timeout=60.0,
                 )
                 saved = True
             except Exception as exc:  # noqa: BLE001 - reported, not raised
@@ -626,13 +901,11 @@ def register_application_tools(mcp):
                 # protecting.
                 saved = False
                 save_error = str(exc)
-        project_dir, project_file, err = await _resolve_project_dir()
-        if err:
-            return err
         from pathlib import Path
         store = _checkpoint_store()
         info = store.create(Path(project_dir), project_file=project_file or "", label=label)
-        result: dict[str, Any] = {"checkpoint": info.summary()}
+        result: dict[str, Any] = {"checkpoint": info.summary(), "project": snapshot_of,
+                                  "other_open_projects": others}
         if save_first:
             result["saved"] = saved
             if not saved:
@@ -669,6 +942,9 @@ def register_application_tools(mcp):
         Returns:
             {restored, removed, missing_blobs}.
         """
+        from ..saving import refused, saving_off
+        if saving_off():
+            return refused("A restore overwrites the project's files.")
         project_dir, _project_file, err = await _resolve_project_dir()
         if err:
             return err
@@ -709,7 +985,8 @@ def register_application_tools(mcp):
         if isinstance(reply, dict) and reply.get("stopped") is True:
             out = {"attached": False, "stopped": True,
                    "message": "Detached from Altium Designer and stopped MCP server"}
-            for key in ("edited_saved", "clean_left_alone"):
+            for key in ("edited_saved", "clean_left_alone",
+                        "saving_off", "not_saved", "saving_note"):
                 if key in reply:
                     out[key] = reply[key]
             return out
@@ -725,6 +1002,7 @@ def register_application_tools(mcp):
         }
 
     @mcp.tool()
+    @_reports_update
     async def app_ping() -> dict[str, Any]:
         """Check that Altium and its bridge script answer, and that the
         running script is the version on disk. A mismatch or a non-empty
@@ -736,14 +1014,21 @@ def register_application_tools(mcp):
             ``bundled_script_version`` and ``bundled_script_path``,
             ``version_match``, ``altium_version``, ``message``,
             ``script_projects_open`` and ``script_location_match`` (False:
-            Altium loaded scripts from elsewhere), ``unit_stamps``,
-            ``stale_units``, ``unstamped_units``, ``other_servers`` (other
-            eda-agent servers on this workspace) and ``warnings``.
+            Altium loaded scripts from elsewhere), ``loop_workspace_dir``
+            (the folder the answering loop takes requests from) and
+            ``server_workspace_dir`` (this server's), ``unit_stamps``,
+            ``stale_units``, ``unstamped_units``, ``saving_allowed`` (False
+            while the dashboard's Saving switch is off), ``other_servers``
+            (other eda-agent servers on this workspace) and ``warnings``.
         """
+        from ..saving import saving_off
         bridge = get_bridge()
         script_path = _bundled_script_path()
         servers, duplicate = _other_servers()
         warnings: list[str] = [duplicate] if duplicate else []
+        capture = _screen_capture_warning()
+        if capture:
+            warnings.append(capture)
         if not bridge.is_altium_running():
             return {
                 "success": False,
@@ -806,7 +1091,7 @@ def register_application_tools(mcp):
             match = False
             msg = f"{msg} {stamp_warnings[0]}"
 
-        return {
+        return _with_session_reminder({
             "success": True,
             "mcp_server_version": _mcp_server_version,
             "altium_script_version": altium_ver,
@@ -816,12 +1101,17 @@ def register_application_tools(mcp):
             "altium_version": result.get("altium_version") or "",
             "script_projects_open": loaded if isinstance(loaded, list) else None,
             "script_location_match": location_match,
+            # Whose loop answered: the folder it polls, as the script
+            # reports it. Empty from a script older than 2026.10.21.
+            "loop_workspace_dir": result.get("workspace_dir") or "",
+            "server_workspace_dir": _server_workspace_dir(),
+            # The dashboard's Saving switch: False means every save is refused.
+            "saving_allowed": not saving_off(),
             **stamp_fields,
             "other_servers": servers,
             "warnings": warnings,
             "message": msg,
-            "_system_reminder": _SESSION_REMINDER,
-        }
+        })
 
     @mcp.tool()
     async def app_get_report() -> dict[str, Any]:
@@ -898,21 +1188,28 @@ def register_application_tools(mcp):
         file_path: str,
         name: Optional[str] = None,
         add_to_project: bool = True,
+        project_path: str = "",
     ) -> dict[str, Any]:
         """Create a new blank document of a given kind and save it to disk.
 
         Saved to `file_path` and, by default, added to the focused
-        project.
+        project, or to ``project_path`` when given. With several projects
+        open, name the project: the focused one is whichever was clicked
+        last, and a scratch sheet added to a production project stays in
+        it. ``member_of`` reads back which projects now list the file.
 
         Args:
             kind: Document kind, 'PCB', 'SCH', 'PCBLIB', 'SCHLIB',
-                'OUTPUTJOB', or any other kind Altium's server module
+                'OUTPUTJOB', 'HarnessWiringDiagram' (a .WirDoc in a
+                .PrjHar), or any other kind Altium's server module
                 registers under.
             file_path: Absolute path where the new document should live.
                 Use Windows backslashes.
             name: Optional display name. Defaults to the filename.
-            add_to_project: Attach the new file to the focused project.
-                Default True. Set False to leave it as a free document.
+            add_to_project: Attach the new file to a project. Default
+                True. Set False to leave it as a free document.
+            project_path: The .PrjPcb to attach it to. An unknown path is
+                refused before anything is created.
 
         The new document is focused, and ``focused`` says whether that
         took, since the next tool acts on the focused one. A save that
@@ -925,8 +1222,14 @@ def register_application_tools(mcp):
 
         Returns:
             Dictionary with kind, file_path, saved, focused,
-            added_to_project.
+            added_to_project and member_of (project paths).
         """
+        # A missing folder made Altium raise a modal save error that holds
+        # the bridge until someone answers it; refused here first.
+        folder = os.path.dirname(file_path)
+        if os.path.isabs(file_path) and folder and not os.path.isdir(folder):
+            return {"success": False, "error": "NOT_SAVED",
+                    "reason": f"the folder does not exist: {folder}"}
         bridge = get_bridge()
         params: dict[str, Any] = {
             "kind": kind,
@@ -935,10 +1238,45 @@ def register_application_tools(mcp):
         }
         if name:
             params["name"] = name
+        if project_path:
+            params["project_path"] = project_path
         result = await bridge.send_command_async(
             "application.create_document", params
         )
         return result
+
+    @mcp.tool()
+    async def app_document_owners() -> dict[str, Any]:
+        """Which Claude session is editing which open document.
+
+        Sessions share one Altium. A tool that writes claims the document
+        it acts on; another session's write to it is refused
+        (DOCUMENT_IN_USE) while the owner has written within the last
+        ``idle_release_seconds``. Reads are never refused, and neither is
+        the person at the dashboard.
+
+        Returns:
+            ``documents`` (each ``document``, ``session``, ``last_command``,
+            ``seconds_since_write``, ``held``, ``yours``) and ``session``,
+            this session's tag.
+        """
+        return await get_bridge().send_command_async("application.document_owners", {})
+
+    @mcp.tool()
+    async def app_claim_document(file_path: str) -> dict[str, Any]:
+        """Take a document over from the session editing it.
+
+        Only when the user says so: the other session's next write to it
+        is then refused instead of this one's.
+
+        Args:
+            file_path: The document's full path.
+
+        Returns:
+            ``document``, ``session`` (this one) and ``previous_owner``.
+        """
+        return await get_bridge().send_command_async(
+            "application.claim_document", {"file_path": file_path})
 
     @mcp.tool()
     async def app_list_documents() -> list[dict[str, Any]]:
@@ -984,8 +1322,20 @@ def register_application_tools(mcp):
         )
 
     @mcp.tool()
-    async def app_get_active_document() -> dict[str, Any]:
+    async def app_get_active_document(session: bool = False) -> dict[str, Any]:
         """Get information about the currently active (focused) document.
+
+        Several Claude sessions can share one Altium. Each command runs on
+        its own session's document (the last one it focused), which Altium
+        puts back in front first if anything else moved the focus. So by
+        default this answers what is REALLY in front, which may be another
+        session's document or one a person has just opened. To work on that
+        document, focus it (app_set_active_document); it then becomes this
+        session's.
+
+        Args:
+            session: True for this session's own document instead, brought
+                back to the front first if something else is there.
 
         Returns:
             Dictionary with active document information:
@@ -998,23 +1348,49 @@ def register_application_tools(mcp):
             Returns empty dict if no document is active.
         """
         bridge = get_bridge()
-        result = await bridge.send_command_async("application.get_active_document")
+        result = await bridge.send_command_async(
+            "application.get_active_document",
+            {} if session else {"front": "true"})
         return result
 
     @mcp.tool()
     async def app_set_active_document(file_path: str) -> dict[str, Any]:
-        """Set a specific document as the active (focused) document.
+        """Set a specific document as the active (focused) document,
+        opening it first when it is a file Altium has not loaded yet (a
+        member of a project just opened, say).
 
         Args:
             file_path: Full path to the document to activate
 
         Returns:
-            Dictionary with result of the operation
+            Dictionary with result of the operation; ``opened`` true when
+            the document had to be opened first.
         """
+        from ..bridge.exceptions import AltiumError
+
         bridge = get_bridge()
-        result = await bridge.send_command_async(
-            "application.set_active_document", {"file_path": file_path}
-        )
+        opened = False
+        try:
+            result = await bridge.send_command_async(
+                "application.set_active_document", {"file_path": file_path}
+            )
+        except AltiumError as exc:
+            # Measured: a demo run opened its project and then could not
+            # bring the board forward because no editor had loaded it.
+            if "not loaded" not in str(exc).lower() or not os.path.isfile(file_path):
+                raise
+            # file_path names the document the open acts on, so ownership
+            # judges that one and not whichever document is in front.
+            await bridge.send_command_async("application.run_process", {
+                "process_name": "WorkspaceManager:OpenObject",
+                "parameters": f"ObjectKind=Document|FileName={file_path}",
+                "file_path": file_path})
+            opened = True
+            result = await bridge.send_command_async(
+                "application.set_active_document", {"file_path": file_path}
+            )
+        if opened:
+            result = {"opened": True, **(result if isinstance(result, dict) else {})}
         if isinstance(result, dict):
             return {"success": True, "file_path": file_path, **result}
         elif result:
@@ -1060,6 +1436,135 @@ def register_application_tools(mcp):
         return result
 
     @mcp.tool()
+    async def app_autosave(
+        enabled: Optional[bool] = None,
+        interval_minutes: Optional[int] = None,
+    ) -> dict[str, Any]:
+        """Read, or set, Altium's auto-save: whether it saves backup
+        copies of open documents, and how often.
+
+        Call with nothing to read. Both values are read back.
+
+        Args:
+            enabled: Auto-save on (True) or off (False).
+            interval_minutes: Minutes between saves, 1 or more.
+
+        Returns:
+            ``enabled``, ``interval_minutes`` and ``changed``.
+        """
+        params: dict[str, Any] = {}
+        if enabled is not None:
+            params["enabled"] = "true" if enabled else "false"
+        if interval_minutes is not None:
+            if interval_minutes < 1:
+                return {"ok": False, "reason": "interval_minutes is 1 or more"}
+            params["interval"] = str(interval_minutes)
+        return await get_bridge().send_command_async("application.autosave", params)
+
+    @mcp.tool()
+    async def app_format_value(
+        action: str,
+        text: Optional[str] = None,
+        value: Optional[Any] = None,
+        kind: Optional[str] = None,
+        decimal: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Read, write or clean up a component value. HOW IT IS WRITTEN IS
+        THE USER'S CHOICE on the Config tab of the bridge panel in Altium,
+        read on every call: RKM (IEC 60062, a letter where the decimal
+        point would be: 4K7, 0R005, 2u2, 10uF, 3V3), SI (4.7k, 0.005, 2.2u,
+        3.3V), SI with the unit (2.2uF, 100nF, 10uH; never on resistors), or
+        None, which leaves values as written: cleanup returns the text
+        unchanged and tostring is refused. The reply's ``value_format``
+        says which applied. Do not pick a form for the user.
+
+        Done by the bridge's own value engine (no document is read or
+        touched), so a script can use the same rules. NO ROUNDING: a value
+        is digits and a power of ten, exact to the last digit.
+
+        Reading is tolerant: 4.7k, 4,7 kOhm, 10 000uF, 2.2uF, 0.1 uF,
+        3,3 V, 125 degC. The unit letter decides the kind; without one,
+        p / n / u is a capacitor and G / M / m / K a resistor. Letters
+        that could read two ways are blocked: on a resistor m is MEGA
+        (milli and micro are written 0R005, 0R0005); on volts and amperes
+        M is milli; femto is never read (100 fF is 0p1). The value ends at
+        the first space or character that is not part of it ("10uF 50V"
+        and "10uF/50V" read 10uF, the rest comes back in ``rest``); a value
+        that runs on into digits or letters it cannot use ("10.1.1k") is
+        refused.
+
+        Args:
+            action: ``cleanup`` (text -> the proper text), ``fromstring``
+                (text -> value and kind) or ``tostring`` (kind + value ->
+                text).
+            text: The value as written, for cleanup / fromstring.
+            value: The value in the base unit (ohm, farad, henry, volt,
+                ampere, %, ppm, degree C) for tostring: a string such as
+                "0.0000022" or "1e3", or a number.
+            kind: ohm, farad, henry, volt, ampere, percent, ppm or
+                celsius (also R, C, L, V, A). Takes precedence over the
+                text; a unit in the text that disagrees is a note.
+            decimal: The decimal separator of the SOURCE text, "." or
+                ",", for "1,000" / "1.000"; default this machine's.
+
+        Returns:
+            ``text`` (cleanup, tostring), ``value`` as an exact decimal
+            string and ``kind`` (cleanup, fromstring), ``rest`` (what
+            followed the value), ``notes`` (every guess made) and
+            ``value_format`` (cleanup, tostring).
+        """
+        act = (action or "").strip().lower()
+        if act not in ("cleanup", "fromstring", "tostring"):
+            return {"ok": False,
+                    "reason": "action is cleanup, fromstring or tostring"}
+        if decimal not in (None, "", ".", ","):
+            return {"ok": False, "reason": "decimal is '.' or ','"}
+        params: dict[str, Any] = {"action": act}
+        if act == "tostring":
+            if value is None or not kind:
+                return {"ok": False, "reason": "tostring needs kind and value"}
+            if isinstance(value, bool):
+                return {"ok": False, "reason": "value is a number"}
+            params["value"] = repr(value) if isinstance(value, float) else str(value)
+        else:
+            if text is None or not str(text).strip():
+                return {"ok": False, "reason": f"{act} needs text"}
+            params["text"] = fold_value_text(str(text))
+        if kind:
+            params["kind"] = kind
+        if decimal:
+            params["decimal"] = decimal
+        if act == "fromstring":
+            return await get_bridge().send_command_async("application.format_value", params)
+
+        from ..preferences import value_format, value_unit
+        style, unit = value_format(), value_unit()
+        if style == "none" and act == "tostring":
+            return {"ok": False, "value_format": "none",
+                    "reason": "No value format is chosen: the Config tab of the "
+                              "bridge panel in Altium says None, so values are "
+                              "left as written. The user can choose one there."}
+        reply = await get_bridge().send_command_async("application.format_value", params)
+        if not isinstance(reply, dict) or reply.get("success") is False or "text" not in reply:
+            return reply
+        reply = dict(reply)
+        if style == "none":
+            reply["text"] = str(text)
+            reply["note"] = ("Left as written: the value format on the Config tab "
+                             "of the bridge panel is None.")
+        elif style == "si":
+            exact = params.get("value") if act == "tostring" else reply.get("value")
+            kind_of = kind if act == "tostring" else reply.get("kind")
+            si = si_value_text(exact, kind_of or "", unit == "with")
+            if si is None:
+                return {"ok": False, "value_format": "si",
+                        "reason": f"No SI form for kind {kind_of!r}; the value read "
+                                  f"{exact!r}."}
+            reply["text"] = si
+        reply["value_format"] = style + ("_unit" if style == "si" and unit == "with" else "")
+        return reply
+
+    @mcp.tool()
     async def app_run_menu(menu_path: str) -> dict[str, Any]:
         """Dispatch a menu command by path. DISPATCH IS NOT EXECUTION:
         Altium accepts an unknown or unavailable process in silence, so
@@ -1067,11 +1572,13 @@ def register_application_tools(mcp):
         Use ``app_click_menu`` when the command must actually run; it
         clicks the real menu and fails on a path that does not exist.
 
-        Mapped paths: "File|Save All", "Tools|Design Rule Check",
-        "Tools|Electrical Rules Check", "Project|Compile", "Edit|Select
-        All", "Edit|Deselect All", "View|Zoom Fit", "Tools|Preferences",
-        "Tools|Extensions and Updates". Anything else is refused with
-        UNMAPPED_MENU_PATH.
+        Any path in the focused editor's menu bar works, in English or
+        in any language Altium ships: it is looked up in Altium's own
+        menu definitions (``app_find_menu_command`` searches them) and
+        the command behind it is run, with no menu walk and no focus
+        taken. The reply names the ``command`` and ``params`` used. A
+        path the install does not declare is refused with
+        UNMAPPED_MENU_PATH and the nearest matches.
 
         Args:
             menu_path: Menu path using pipe separators (e.g., "File|Save All")
@@ -1082,9 +1589,14 @@ def register_application_tools(mcp):
             parse is reported as a failure, not smoothed into a success.
         """
         bridge = get_bridge()
-        result = await bridge.send_command_async(
-            "application.execute_menu", {"menu_path": menu_path}
-        )
+        try:
+            result = await bridge.send_command_async(
+                "application.execute_menu", {"menu_path": menu_path}
+            )
+        except AltiumCommandError as exc:
+            if getattr(exc, "code", "") != "UNMAPPED_MENU_PATH":
+                raise
+            return await _run_declared_menu(bridge, menu_path)
         # Report what the handler said, and nothing it did not say. The
         # previous ``{"success": True, **result}`` did preserve an
         # explicit ``success: false`` (the spread wins), but it INVENTED

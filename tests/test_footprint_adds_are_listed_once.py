@@ -41,9 +41,20 @@ def _settled(text: str) -> set[str]:
     return set(re.findall(r"Action = '(\w+)'", _body(text, "LibActionAddsToFootprint")))
 
 
+#: Helpers that add one primitive to the library board for their caller.
+_BOARD_ADDERS = ("AttachToCurrentFootprint(", "AddLibVia(", "AddExtrudedBody(")
+
+
 def _adds_to_board(text: str, handler: str) -> bool:
     body = _body(text, handler)
-    return "Board.AddPCBObject(" in body or "AttachToCurrentFootprint(" in body
+    return "Board.AddPCBObject(" in body or any(h in body for h in _BOARD_ADDERS)
+
+
+def test_the_board_adders_do_add_to_the_board():
+    text = _text()
+    for helper in _BOARD_ADDERS:
+        name = helper.rstrip("(")
+        assert "Board.AddPCBObject(" in _body(text, name), name
 
 
 def test_every_writer_that_adds_to_the_board_is_settled():
@@ -79,5 +90,5 @@ def test_settling_makes_the_same_footprint_current_again():
 
 def test_the_self_settling_writer_does_restore_the_footprint():
     body = _body(_text(), "Lib_RedrawAssembly")
-    tail = body[body.index("PCBServer.PostProcess"):]
+    tail = body[body.index("PcbEndEdit(0)"):]
     assert "PcbLib.SetState_CurrentComponent(SavedCurrent)" in tail
